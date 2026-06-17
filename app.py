@@ -2376,6 +2376,7 @@ class WorldCupFloatApp:
                 font_slant = font_actual.get("slant", "roman")
                 font_size = 9
                 if compact:
+                    home_width = layout.grid_bbox(0, 1)[2] - 4
                     compact_width = layout.grid_bbox(1, 1)[2] + away_width - 4
                     while font_size > 6:
                         probe = tkfont.Font(
@@ -2385,13 +2386,19 @@ class WorldCupFloatApp:
                             weight=font_weight,
                             slant=font_slant,
                         )
-                        if probe.measure(status_label.cget("text")) <= compact_width:
+                        round_fits = probe.measure(round_label.cget("text")) <= home_width
+                        status_fits = probe.measure(status_label.cget("text")) <= compact_width
+                        if round_fits and status_fits:
                             break
                         font_size -= 1
+                round_label.configure(
+                    font=(font_family, font_size, font_weight, font_slant),
+                    anchor="w" if compact else "center",
+                )
                 status_label.configure(font=(font_family, font_size, font_weight, font_slant))
                 status_label.configure(
                     wraplength=0,
-                    justify="left" if compact else ("right" if not centered else "center"),
+                    justify="right" if compact or not centered else "center",
                 )
                 if getattr(status_label, "_worldcup_alignment", None) == target:
                     return
@@ -2400,7 +2407,7 @@ class WorldCupFloatApp:
                     status_label.configure(anchor="center")
                     status_label.grid(row=0, column=2, sticky="ew", pady=(0, 10))
                 elif compact:
-                    status_label.configure(anchor="w")
+                    status_label.configure(anchor="e")
                     status_label.grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 10))
                 else:
                     status_label.configure(anchor="e")
