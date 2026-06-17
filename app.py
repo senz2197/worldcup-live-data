@@ -2366,25 +2366,42 @@ class WorldCupFloatApp:
                 away_width = layout.grid_bbox(2, 1)[2]
                 layout_width = layout.winfo_width()
                 status_font = tkfont.Font(root=self.root, font=status_label.cget("font"))
-                round_font = tkfont.Font(root=self.root, font=round_label.cget("font"))
                 status_width = status_font.measure(status_label.cget("text")) + 4
-                round_width = round_font.measure(round_label.cget("text")) + 4
                 centered = status_width <= max(0, away_width - 16)
-                wrapped = not centered and round_width + status_width + 12 > layout_width
-                target = "center" if centered else ("wrapped" if wrapped else "right")
-                if wrapped:
-                    status_label.configure(
-                        wraplength=max(96, layout_width - round_width - 16),
-                        justify="right",
-                    )
-                else:
-                    status_label.configure(wraplength=0, justify="center" if centered else "right")
+                compact = layout_width <= 320
+                target = "compact" if compact else ("center" if centered else "right")
+                font_actual = status_font.actual()
+                font_family = font_actual.get("family", self.ui_font_var.get())
+                font_weight = font_actual.get("weight", "bold")
+                font_slant = font_actual.get("slant", "roman")
+                font_size = 9
+                if compact:
+                    compact_width = layout.grid_bbox(1, 1)[2] + away_width - 4
+                    while font_size > 6:
+                        probe = tkfont.Font(
+                            root=self.root,
+                            family=font_family,
+                            size=font_size,
+                            weight=font_weight,
+                            slant=font_slant,
+                        )
+                        if probe.measure(status_label.cget("text")) <= compact_width:
+                            break
+                        font_size -= 1
+                status_label.configure(font=(font_family, font_size, font_weight, font_slant))
+                status_label.configure(
+                    wraplength=0,
+                    justify="left" if compact else ("right" if not centered else "center"),
+                )
                 if getattr(status_label, "_worldcup_alignment", None) == target:
                     return
                 status_label.grid_forget()
-                if centered:
+                if centered and not compact:
                     status_label.configure(anchor="center")
                     status_label.grid(row=0, column=2, sticky="ew", pady=(0, 10))
+                elif compact:
+                    status_label.configure(anchor="w")
+                    status_label.grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 10))
                 else:
                     status_label.configure(anchor="e")
                     status_label.grid(row=0, column=1, columnspan=2, sticky="e", pady=(0, 10))
