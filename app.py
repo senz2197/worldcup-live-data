@@ -1155,6 +1155,7 @@ class WorldCupFloatApp:
             controls,
             textvariable=self.team_var,
             state="readonly",
+            style="WorldCup.TCombobox",
             width=1,
             values=["全部球队"],
         )
@@ -1208,7 +1209,36 @@ class WorldCupFloatApp:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        style.configure("TCombobox", fieldbackground=PANEL_2, background=PANEL_2, foreground=TEXT)
+        style.configure(
+            "WorldCup.TCombobox",
+            fieldbackground=PANEL_2,
+            background=PANEL_3,
+            foreground=TEXT,
+            arrowcolor=ACCENT,
+            bordercolor=LINE,
+            lightcolor=LINE,
+            darkcolor=LINE,
+            insertcolor=TEXT,
+            relief="flat",
+            borderwidth=1,
+            arrowsize=11,
+            padding=(7, 4),
+        )
+        style.map(
+            "WorldCup.TCombobox",
+            fieldbackground=[("readonly", PANEL_2), ("disabled", PANEL)],
+            foreground=[("readonly", TEXT), ("disabled", MUTED)],
+            background=[("pressed", PANEL_3), ("active", PANEL_3), ("readonly", PANEL_3)],
+            arrowcolor=[("pressed", ACCENT), ("active", ACCENT_2), ("readonly", ACCENT)],
+            bordercolor=[("focus", ACCENT), ("active", ACCENT), ("readonly", LINE)],
+            lightcolor=[("focus", ACCENT), ("readonly", LINE)],
+            darkcolor=[("focus", ACCENT), ("readonly", LINE)],
+        )
+        self.root.option_add("*TCombobox*Listbox.background", PANEL_2, 80)
+        self.root.option_add("*TCombobox*Listbox.foreground", TEXT, 80)
+        self.root.option_add("*TCombobox*Listbox.selectBackground", ACCENT, 80)
+        self.root.option_add("*TCombobox*Listbox.selectForeground", self._contrast_text_color(ACCENT), 80)
+        self.root.option_add("*TCombobox*Listbox.font", (self.ui_font_var.get(), 9), 80)
 
     def _text_button(
         self,
@@ -1426,7 +1456,17 @@ class WorldCupFloatApp:
         popup.configure(bg=PANEL)
         popup.attributes("-topmost", True)
         popup.attributes("-alpha", 0.96)
-        popup.geometry(f"330x560+{self.root.winfo_x() + 28}+{self.root.winfo_y() + 72}")
+        settings_width = 360
+        settings_height = 560
+        settings_x = min(
+            max(8, self.root.winfo_x() + 28),
+            max(8, self.root.winfo_screenwidth() - settings_width - 8),
+        )
+        settings_y = min(
+            max(8, self.root.winfo_y() + 72),
+            max(8, self.root.winfo_screenheight() - settings_height - 48),
+        )
+        popup.geometry(f"{settings_width}x{settings_height}+{settings_x}+{settings_y}")
         self.settings_popup = popup
 
         header = tk.Frame(popup, bg=PANEL, padx=12, pady=9)
@@ -1468,7 +1508,14 @@ class WorldCupFloatApp:
             row = tk.Frame(font_panel, bg=PANEL_2)
             row.pack(fill="x", pady=2)
             tk.Label(row, text=label, bg=PANEL_2, fg=MUTED, width=7, anchor="w", font=("Microsoft YaHei UI", 8)).pack(side="left")
-            combo = ttk.Combobox(row, textvariable=variable, state="readonly", values=self.available_fonts, height=14)
+            combo = ttk.Combobox(
+                row,
+                textvariable=variable,
+                state="readonly",
+                style="WorldCup.TCombobox",
+                values=self.available_fonts,
+                height=14,
+            )
             combo.pack(side="left", fill="x", expand=True)
             combo.bind("<<ComboboxSelected>>", self._apply_font_settings)
             combo.bind(
@@ -1527,10 +1574,11 @@ class WorldCupFloatApp:
             relief="flat",
             font=("Microsoft YaHei UI", 9),
         )
+        color_button = self._text_button(color_row, "选色", self._choose_theme_color)
+        color_button.pack(side="right", padx=(8, 0))
         color_entry.pack(side="left", fill="x", expand=True, ipady=5)
         color_entry.bind("<Return>", lambda _event: self._apply_theme_color())
         color_entry.bind("<FocusOut>", lambda _event: self._apply_theme_color())
-        self._text_button(color_row, "选色", self._choose_theme_color).pack(side="left", padx=(8, 0))
 
         tk.Label(body, text="配色方案", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
         palette_row = tk.Frame(body, bg=PANEL)
@@ -1543,6 +1591,7 @@ class WorldCupFloatApp:
             palette_row,
             textvariable=palette_label_var,
             state="readonly",
+            style="WorldCup.TCombobox",
             values=list(palette_reverse.keys()),
             width=12,
         )
