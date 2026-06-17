@@ -2364,54 +2364,63 @@ class WorldCupFloatApp:
         def align_header(_event: tk.Event | None = None) -> None:
             try:
                 away_width = layout.grid_bbox(2, 1)[2]
-                layout_width = layout.winfo_width()
                 status_font = tkfont.Font(root=self.root, font=status_label.cget("font"))
-                status_width = status_font.measure(status_label.cget("text")) + 4
-                centered = status_width <= max(0, away_width - 16)
-                compact = layout_width <= 320
-                target = "compact" if compact else ("center" if centered else "right")
                 font_actual = status_font.actual()
                 font_family = font_actual.get("family", self.ui_font_var.get())
                 font_weight = font_actual.get("weight", "bold")
                 font_slant = font_actual.get("slant", "roman")
-                font_size = 9
-                if compact:
-                    home_width = layout.grid_bbox(0, 1)[2] - 4
-                    compact_width = layout.grid_bbox(1, 1)[2] + away_width - 4
-                    while font_size > 6:
-                        probe = tkfont.Font(
-                            root=self.root,
-                            family=font_family,
-                            size=font_size,
-                            weight=font_weight,
-                            slant=font_slant,
-                        )
-                        round_fits = probe.measure(round_label.cget("text")) <= home_width
-                        status_fits = probe.measure(status_label.cget("text")) <= compact_width
-                        if round_fits and status_fits:
-                            break
-                        font_size -= 1
-                round_label.configure(
-                    font=(font_family, font_size, font_weight, font_slant),
-                    anchor="w" if compact else "center",
+                normal_font = tkfont.Font(
+                    root=self.root,
+                    family=font_family,
+                    size=9,
+                    weight=font_weight,
+                    slant=font_slant,
                 )
-                status_label.configure(font=(font_family, font_size, font_weight, font_slant))
-                status_label.configure(
-                    wraplength=0,
-                    justify="right" if compact or not centered else "center",
+                status_width = normal_font.measure(status_label.cget("text")) + 4
+                round_width = normal_font.measure(round_label.cget("text")) + 4
+                home_width = layout.grid_bbox(0, 1)[2]
+                score_width = layout.grid_bbox(1, 1)[2]
+                left_edge = round_width > max(0, home_width - 16)
+                right_edge = status_width > max(0, away_width - 16)
+                font_size = 9
+                left_available = home_width - 4
+                right_available = (score_width + away_width if right_edge else away_width) - 4
+                while font_size > 6:
+                    probe = tkfont.Font(
+                        root=self.root,
+                        family=font_family,
+                        size=font_size,
+                        weight=font_weight,
+                        slant=font_slant,
+                    )
+                    round_fits = probe.measure(round_label.cget("text")) <= left_available
+                    status_fits = probe.measure(status_label.cget("text")) <= right_available
+                    if round_fits and status_fits:
+                        break
+                    font_size -= 1
+                target = (
+                    "edge" if left_edge else "center",
+                    "edge" if right_edge else "center",
+                    font_size,
                 )
                 if getattr(status_label, "_worldcup_alignment", None) == target:
                     return
+                round_label.configure(
+                    font=(font_family, font_size, font_weight, font_slant),
+                    anchor="w" if left_edge else "center",
+                )
+                status_label.configure(
+                    font=(font_family, font_size, font_weight, font_slant),
+                    wraplength=0,
+                    justify="right" if right_edge else "center",
+                )
                 status_label.grid_forget()
-                if centered and not compact:
-                    status_label.configure(anchor="center")
-                    status_label.grid(row=0, column=2, sticky="ew", pady=(0, 10))
-                elif compact:
+                if right_edge:
                     status_label.configure(anchor="e")
                     status_label.grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 10))
                 else:
-                    status_label.configure(anchor="e")
-                    status_label.grid(row=0, column=1, columnspan=2, sticky="e", pady=(0, 10))
+                    status_label.configure(anchor="center")
+                    status_label.grid(row=0, column=2, sticky="ew", pady=(0, 10))
                 status_label._worldcup_alignment = target
             except tk.TclError:
                 return
