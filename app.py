@@ -1456,7 +1456,7 @@ class WorldCupFloatApp:
         popup.configure(bg=PANEL)
         popup.attributes("-topmost", True)
         popup.attributes("-alpha", 0.96)
-        settings_width = 360
+        settings_width = 380
         settings_height = 560
         settings_x = min(
             max(8, self.root.winfo_x() + 28),
@@ -1564,7 +1564,7 @@ class WorldCupFloatApp:
         color_row = tk.Frame(body, bg=PANEL)
         color_row.pack(fill="x", pady=(3, 10))
         color_swatch = tk.Label(color_row, text="", bg=self.theme_color_var.get(), width=3, height=1, highlightthickness=1, highlightbackground=LINE)
-        color_swatch.pack(side="left", padx=(0, 8), ipady=6)
+        color_swatch.grid(row=0, column=0, sticky="nsew", padx=(0, 8), ipady=6)
         color_entry = tk.Entry(
             color_row,
             textvariable=self.theme_color_var,
@@ -1575,8 +1575,11 @@ class WorldCupFloatApp:
             font=("Microsoft YaHei UI", 9),
         )
         color_button = self._text_button(color_row, "选色", self._choose_theme_color)
-        color_button.pack(side="right", padx=(8, 0))
-        color_entry.pack(side="left", fill="x", expand=True, ipady=5)
+        color_entry.grid(row=0, column=1, sticky="nsew", ipady=5)
+        color_button.grid(row=0, column=2, sticky="nsew", padx=(8, 4))
+        color_row.columnconfigure(0, weight=0, minsize=42)
+        color_row.columnconfigure(1, weight=1, minsize=150)
+        color_row.columnconfigure(2, weight=0, minsize=84)
         color_entry.bind("<Return>", lambda _event: self._apply_theme_color())
         color_entry.bind("<FocusOut>", lambda _event: self._apply_theme_color())
 
