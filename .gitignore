@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+
+build/
+dist/
+cache/
+
+selected_app_icon.ico
+worldcup_error.log
+
