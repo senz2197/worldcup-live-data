@@ -2318,27 +2318,38 @@ class WorldCupFloatApp:
     def _match_card(self, parent: tk.Widget, match: Match, live: bool = False) -> None:
         card = tk.Frame(parent, bg=PANEL, padx=12, pady=11, highlightthickness=1, highlightbackground=LINE)
         card.pack(fill="x", pady=6)
-        top = tk.Frame(card, bg=PANEL)
-        top.pack(fill="x", pady=(0, 10))
+        layout = tk.Frame(card, bg=PANEL)
+        layout.pack(fill="x")
+        layout.columnconfigure(0, weight=1, uniform="match_team", minsize=72)
+        layout.columnconfigure(1, weight=0, minsize=82)
+        layout.columnconfigure(2, weight=1, uniform="match_team", minsize=72)
+        layout.rowconfigure(1, minsize=82)
         status_color = LIVE if match.is_live or live else (ACCENT if match.completed else WARNING)
         status = "LIVE " + match.status_text if match.is_live else (match.status_text or ("完赛" if match.completed else "未开始"))
         when = match.date.strftime("%m-%d %H:%M") if match.date else "时间待定"
         group = f" · {match.group} 组" if match.group else ""
-        round_label = tk.Label(top, text=f"{match.round_name}{group}", bg=PANEL, fg=ACCENT, font=("Microsoft YaHei UI", 9, "bold"))
-        round_label.pack(side="left")
-        status_label = tk.Label(top, text=f"{when} · {status}", bg=PANEL, fg=status_color, font=("Microsoft YaHei UI", 9, "bold"))
-        status_label.pack(side="right")
-        self._bind_wrap(round_label, reserve=138, minimum=80, maximum=190)
+        round_label = tk.Label(
+            layout,
+            text=f"{match.round_name}{group}",
+            bg=PANEL,
+            fg=ACCENT,
+            anchor="center",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        round_label.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        status_label = tk.Label(
+            layout,
+            text=f"{when} · {status}",
+            bg=PANEL,
+            fg=status_color,
+            anchor="e",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        status_label.grid(row=0, column=1, columnspan=2, sticky="e", pady=(0, 10))
 
-        body = tk.Frame(card, bg=PANEL)
-        body.pack(fill="x")
-        body.columnconfigure(0, weight=1, uniform="match_team", minsize=72)
-        body.columnconfigure(1, weight=0, minsize=82)
-        body.columnconfigure(2, weight=1, uniform="match_team", minsize=72)
-        body.rowconfigure(0, minsize=82)
-        home_labels = self._score_team_block(body, match.home, align="left", column=0)
+        home_labels = self._score_team_block(layout, match.home, align="left", column=0, row=1)
         scoreline_label = tk.Label(
-            body,
+            layout,
             text=self._scoreline(match),
             bg=PANEL,
             fg=TEXT,
@@ -2347,8 +2358,42 @@ class WorldCupFloatApp:
             font=("Microsoft YaHei UI", 20, "bold"),
         )
         scoreline_label._worldcup_score_font = True
-        scoreline_label.grid(row=0, column=1, sticky="nsew", padx=3)
-        away_labels = self._score_team_block(body, match.away, align="right", column=2)
+        scoreline_label.grid(row=1, column=1, sticky="nsew", padx=3)
+        away_labels = self._score_team_block(layout, match.away, align="right", column=2, row=1)
+
+        def align_header(_event: tk.Event | None = None) -> None:
+            try:
+                away_width = layout.grid_bbox(2, 1)[2]
+                layout_width = layout.winfo_width()
+                status_font = tkfont.Font(root=self.root, font=status_label.cget("font"))
+                round_font = tkfont.Font(root=self.root, font=round_label.cget("font"))
+                status_width = status_font.measure(status_label.cget("text")) + 4
+                round_width = round_font.measure(round_label.cget("text")) + 4
+                centered = status_width <= max(0, away_width - 16)
+                wrapped = not centered and round_width + status_width + 12 > layout_width
+                target = "center" if centered else ("wrapped" if wrapped else "right")
+                if wrapped:
+                    status_label.configure(
+                        wraplength=max(96, layout_width - round_width - 16),
+                        justify="right",
+                    )
+                else:
+                    status_label.configure(wraplength=0, justify="center" if centered else "right")
+                if getattr(status_label, "_worldcup_alignment", None) == target:
+                    return
+                status_label.grid_forget()
+                if centered:
+                    status_label.configure(anchor="center")
+                    status_label.grid(row=0, column=2, sticky="ew", pady=(0, 10))
+                else:
+                    status_label.configure(anchor="e")
+                    status_label.grid(row=0, column=1, columnspan=2, sticky="e", pady=(0, 10))
+                status_label._worldcup_alignment = target
+            except tk.TclError:
+                return
+
+        layout.bind("<Configure>", align_header, add="+")
+        layout.after_idle(align_header)
         labels = {
             "round": round_label,
             "status": status_label,
@@ -2358,8 +2403,7 @@ class WorldCupFloatApp:
         }
         self.match_labels.setdefault(match.id, []).append(labels)
         self._bind_match_open(card, match)
-        self._bind_match_open(top, match)
-        self._bind_match_open(body, match)
+        self._bind_match_open(layout, match)
         self._bind_match_open(scoreline_label, match)
 
     def _bind_match_open(self, widget: tk.Widget, match: Match) -> None:
@@ -2635,9 +2679,16 @@ class WorldCupFloatApp:
             return f"{value}%"
         return value
 
-    def _score_team_block(self, parent: tk.Widget, team: MatchTeam, align: str, column: int) -> dict[str, tk.Label]:
+    def _score_team_block(
+        self,
+        parent: tk.Widget,
+        team: MatchTeam,
+        align: str,
+        column: int,
+        row: int = 0,
+    ) -> dict[str, tk.Label]:
         block = tk.Frame(parent, bg=PANEL)
-        block.grid(row=0, column=column, sticky="nsew")
+        block.grid(row=row, column=column, sticky="nsew")
         text_anchor = "center"
         justify = "center"
         icon = self._team_icon(block, team.id, team.logo, size=34, clickable=team.clickable)
