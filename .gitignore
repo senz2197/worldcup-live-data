@@ -4,7 +4,8 @@ __pycache__/
 build/
 dist/
 cache/
+release_build*/
+publish/
 
 selected_app_icon.ico
 worldcup_error.log
-
