@@ -33,6 +33,7 @@ WorldCupFloat_Portable.zip
 - Windows Per-Monitor V2 high-DPI rendering for sharper text and flags
 - Independent normal UI font and score font selectors
 - Theme presets and editable colors with locally persisted settings
+- One-click GitHub update that preserves the current local configuration
 
 ## Data Sources
 

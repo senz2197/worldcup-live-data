@@ -3,11 +3,15 @@ from __future__ import annotations
 import hashlib
 import ctypes
 import json
+import os
+import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 import urllib.request
+import zipfile
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,6 +53,12 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
+APP_VERSION = "1.1.0"
+GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
+GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
+GITHUB_LATEST_DOWNLOAD_URL = (
+    f"https://github.com/{GITHUB_REPOSITORY}/releases/latest/download/WorldCupFloat_Portable.zip"
+)
 PALETTE_PRESETS = {
     "codex": {
         "label": "Codex 深色",
@@ -420,6 +430,8 @@ class WorldCupFloatApp:
     def __init__(self) -> None:
         enable_high_dpi_rendering()
         self.root = tk.Tk()
+        self.ui_tasks: queue.Queue = queue.Queue()
+        self.root.after(50, self._drain_ui_tasks)
         self.config = self._load_config()
         self.available_fonts = sorted(set(tkfont.families(self.root)), key=str.casefold)
         self.ui_font_var = tk.StringVar(value=self._valid_font_name(self.config.get("ui_font"), DEFAULT_UI_FONT))
@@ -502,6 +514,7 @@ class WorldCupFloatApp:
         self.match_notifications_var = tk.BooleanVar(value=bool(self.config.get("match_notifications", True)))
         self.live_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("live_refresh_seconds"), 5))
         self.default_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("default_refresh_seconds"), 15))
+        self.update_status_var = tk.StringVar(value=f"当前版本 {APP_VERSION}")
         self.root.attributes("-alpha", max(0.72, min(1.0, float(self.alpha_var.get()))))
         self.root.attributes("-topmost", self.topmost_var.get())
 
@@ -518,6 +531,24 @@ class WorldCupFloatApp:
 
     def run(self) -> None:
         self.root.mainloop()
+
+    def _post_ui(self, callback) -> None:
+        self.ui_tasks.put(callback)
+
+    def _drain_ui_tasks(self) -> None:
+        try:
+            while True:
+                callback = self.ui_tasks.get_nowait()
+                try:
+                    callback()
+                except Exception:
+                    traceback.print_exc()
+        except queue.Empty:
+            pass
+        try:
+            self.root.after(50, self._drain_ui_tasks)
+        except tk.TclError:
+            pass
 
     def _load_config(self) -> dict[str, str]:
         if not CONFIG_PATH.exists():
@@ -829,6 +860,111 @@ class WorldCupFloatApp:
         self.default_refresh_seconds_var.set(self._valid_seconds(self.default_refresh_seconds_var.get(), 15))
         self._save_config()
 
+    def _version_tuple(self, value: str) -> tuple[int, ...]:
+        parts = []
+        for part in str(value).strip().lstrip("vV").split("."):
+            digits = "".join(character for character in part if character.isdigit())
+            parts.append(int(digits or 0))
+        return tuple(parts)
+
+    def _check_for_updates(self) -> None:
+        if self.update_status_var.get().startswith("正在"):
+            return
+        self.update_status_var.set("正在检查 GitHub 最新版本...")
+
+        def worker() -> None:
+            try:
+                request = urllib.request.Request(
+                    GITHUB_VERSION_URL,
+                    headers={"User-Agent": f"WorldCupFloat/{APP_VERSION}"},
+                )
+                with urllib.request.urlopen(request, timeout=15) as response:
+                    version_info = json.loads(response.read().decode("utf-8"))
+                latest = str(version_info.get("version") or "").lstrip("vV")
+                if not latest:
+                    raise RuntimeError("GitHub 未返回版本号")
+                if self._version_tuple(latest) <= self._version_tuple(APP_VERSION):
+                    self._post_ui(lambda: self.update_status_var.set(f"已是最新版 {APP_VERSION}"))
+                    return
+                self._post_ui(lambda current=latest: self.update_status_var.set(f"正在下载版本 {current}..."))
+                update_dir = Path(tempfile.mkdtemp(prefix="worldcup_update_"))
+                archive_path = update_dir / "WorldCupFloat_Portable.zip"
+                download = urllib.request.Request(
+                    str(version_info.get("download_url") or GITHUB_LATEST_DOWNLOAD_URL),
+                    headers={"User-Agent": f"WorldCupFloat/{APP_VERSION}"},
+                )
+                with urllib.request.urlopen(download, timeout=60) as response, archive_path.open("wb") as handle:
+                    while True:
+                        chunk = response.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        handle.write(chunk)
+                if not zipfile.is_zipfile(archive_path):
+                    raise RuntimeError("下载的更新包无效")
+                self._post_ui(
+                    lambda path=archive_path, current=latest: self._install_downloaded_update(path, current)
+                )
+            except Exception as exc:
+                message = str(exc) or "未知错误"
+                self._post_ui(lambda detail=message: self.update_status_var.set(f"更新失败：{detail}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _install_downloaded_update(self, archive_path: Path, latest: str) -> None:
+        if not getattr(sys, "frozen", False):
+            self.update_status_var.set(f"已下载 {latest}，开发模式不自动替换")
+            return
+        target_exe = Path(sys.executable).resolve()
+        target_dir = target_exe.parent
+        script_path = archive_path.parent / "install_update.ps1"
+        script = r"""
+param(
+    [int]$ProcessId,
+    [string]$Archive,
+    [string]$TargetDirectory,
+    [string]$ExecutableName
+)
+$ErrorActionPreference = "Stop"
+Wait-Process -Id $ProcessId -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 700
+$extract = Join-Path ([System.IO.Path]::GetTempPath()) ("worldcup_extract_" + [guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $extract | Out-Null
+Expand-Archive -LiteralPath $Archive -DestinationPath $extract -Force
+$newExe = Get-ChildItem -LiteralPath $extract -Recurse -Filter $ExecutableName | Select-Object -First 1
+if (-not $newExe) { throw "Updated executable was not found." }
+$source = $newExe.Directory.FullName
+Get-ChildItem -LiteralPath $source | ForEach-Object {
+    if ($_.Name -ne "config.json") {
+        Copy-Item -LiteralPath $_.FullName -Destination $TargetDirectory -Recurse -Force
+    }
+}
+Start-Process -FilePath (Join-Path $TargetDirectory $ExecutableName) -WorkingDirectory $TargetDirectory
+Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
+"""
+        script_path.write_text(script.strip() + "\n", encoding="utf-8-sig")
+        self.update_status_var.set(f"正在安装版本 {latest}，软件即将重启...")
+        subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script_path),
+                "-ProcessId",
+                str(os.getpid()),
+                "-Archive",
+                str(archive_path),
+                "-TargetDirectory",
+                str(target_dir),
+                "-ExecutableName",
+                target_exe.name,
+            ],
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        self.root.after(300, self.exit_app)
+
     def _apply_icon_choice(self, choice: str | None = None) -> None:
         if choice is not None:
             self.icon_choice_var.set(self._valid_icon_choice(choice))
@@ -1088,6 +1224,38 @@ class WorldCupFloatApp:
         width = min(360, max(300, self.root.winfo_screenwidth() // 4))
         height = min(560, max(430, self.root.winfo_screenheight() - 160))
         return f"{width}x{height}"
+
+    def _apply_window_preset(self, geometry: str) -> None:
+        self.root.geometry(geometry)
+
+        def refresh_layout() -> None:
+            try:
+                self.root.update_idletasks()
+                self._relayout_match_headers()
+                self.root.update_idletasks()
+                self._save_config()
+            except tk.TclError:
+                return
+
+        self.root.after(40, refresh_layout)
+        self.root.after(160, refresh_layout)
+
+    def _relayout_match_headers(self) -> None:
+        frame = self.tabs.get(self.active_tab)
+        if frame is None:
+            return
+
+        def visit(widget: tk.Widget) -> None:
+            callback = getattr(widget, "_worldcup_align_header", None)
+            if callback is not None:
+                try:
+                    callback()
+                except tk.TclError:
+                    pass
+            for child in widget.winfo_children():
+                visit(child)
+
+        visit(frame)
 
     def _mark_as_tool_window(self) -> None:
         if not sys.platform.startswith("win"):
@@ -1731,8 +1899,22 @@ class WorldCupFloatApp:
 
         size_row = tk.Frame(body, bg=PANEL)
         size_row.pack(fill="x")
-        self._text_button(size_row, "紧凑", lambda: self.root.geometry(self._compact_geometry())).pack(side="left", padx=(0, 8))
-        self._text_button(size_row, "宽屏", lambda: self.root.geometry("520x620")).pack(side="left")
+        self._text_button(size_row, "紧凑", lambda: self._apply_window_preset(self._compact_geometry())).pack(side="left", padx=(0, 8))
+        self._text_button(size_row, "宽屏", lambda: self._apply_window_preset("520x620")).pack(side="left")
+
+        update_panel = tk.Frame(body, bg=PANEL_2, padx=9, pady=8, highlightthickness=1, highlightbackground=LINE)
+        update_panel.pack(fill="x", pady=(12, 0))
+        update_info = tk.Label(
+            update_panel,
+            textvariable=self.update_status_var,
+            bg=PANEL_2,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            font=("Microsoft YaHei UI", 8),
+        )
+        update_info.pack(side="left", fill="x", expand=True)
+        self._text_button(update_panel, "检查并更新", self._check_for_updates).pack(side="right", padx=(8, 0))
         self._apply_fonts_to_tree(popup)
 
     def select_tab(self, key: str) -> None:
@@ -2426,6 +2608,7 @@ class WorldCupFloatApp:
                 return
 
         layout.bind("<Configure>", align_header, add="+")
+        layout._worldcup_align_header = align_header
         layout.after_idle(align_header)
         labels = {
             "round": round_label,
