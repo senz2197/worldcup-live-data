@@ -53,7 +53,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.1.2"
+APP_VERSION = "1.1.3"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -291,6 +291,9 @@ class ScrollFrame(tk.Frame):
         self._drag_start_fraction = 0.0
         self._saved_yview = 0.0
         self._saved_yoffset = 0.0
+        self._repaint_after_id: str | None = None
+        self._scroll_idle_after_id: str | None = None
+        self.scroll_active = False
         self.body.bind("<Configure>", self._update_scroll_region)
         self.canvas.bind("<Configure>", self._update_width)
         self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
@@ -336,6 +339,9 @@ class ScrollFrame(tk.Frame):
     def _on_mousewheel(self, event: tk.Event) -> None:
         if self.winfo_viewable() and self._contains_widget(event.widget):
             self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            self._mark_scrolling()
+            self._schedule_repaint()
+            return "break"
 
     def _contains_widget(self, widget: tk.Widget) -> bool:
         if widget.winfo_toplevel() is not self.winfo_toplevel():
@@ -377,11 +383,48 @@ class ScrollFrame(tk.Frame):
         start_offset = self._drag_start_fraction * content_height
         target_offset = max(0, min(scrollable_height, start_offset - pointer_delta))
         self.canvas.yview_moveto(target_offset / content_height)
+        self._mark_scrolling()
+        self._schedule_repaint()
 
     def _stop_content_drag(self, _event: tk.Event) -> None:
         if not self._drag_active:
             return
         self._drag_active = False
+        self._schedule_repaint(immediate=True)
+
+    def _mark_scrolling(self) -> None:
+        self.scroll_active = True
+        if self._scroll_idle_after_id is not None:
+            try:
+                self.after_cancel(self._scroll_idle_after_id)
+            except tk.TclError:
+                pass
+        self._scroll_idle_after_id = self.after(180, self._finish_scrolling)
+
+    def _finish_scrolling(self) -> None:
+        self._scroll_idle_after_id = None
+        self.scroll_active = False
+        self._force_repaint()
+
+    def _schedule_repaint(self, immediate: bool = False) -> None:
+        if self._repaint_after_id is not None:
+            try:
+                self.after_cancel(self._repaint_after_id)
+            except tk.TclError:
+                pass
+        delay = 0 if immediate else 16
+        self._repaint_after_id = self.after(delay, self._force_repaint)
+
+    def _force_repaint(self) -> None:
+        self._repaint_after_id = None
+        try:
+            self.canvas.update_idletasks()
+            if sys.platform.startswith("win"):
+                hwnd = self.winfo_toplevel().winfo_id()
+                flags = 0x0001 | 0x0004 | 0x0080 | 0x0100
+                ctypes.windll.user32.RedrawWindow(hwnd, None, None, flags)
+        except (tk.TclError, OSError):
+            return
 
 
 class FlatSlider(tk.Canvas):
@@ -1209,6 +1252,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.image_refresh_after_id = None
         self.image_refresh_pending = False
         if self.snapshot and self.root.state() != "withdrawn":
+            active_frame = self.tabs.get(self.active_tab)
+            if active_frame is not None and active_frame.scroll_active:
+                self.image_refresh_pending = True
+                self.image_refresh_after_id = self.root.after(220, self._refresh_images)
+                return
             self._invalidate_render_cache(self.active_tab)
             self.render_active()
 
@@ -2014,6 +2062,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.status_var.set("")
 
     def _apply_snapshot(self, snapshot: Snapshot, quiet: bool = True) -> None:
+        active_frame = self.tabs.get(self.active_tab)
+        if active_frame is not None and active_frame.scroll_active:
+            self.root.after(220, lambda current=snapshot: self._apply_snapshot(current, quiet=quiet))
+            return
         had_snapshot = self.snapshot is not None
         old_signatures = {
             tab: self._active_signature(self.snapshot, tab=tab)
