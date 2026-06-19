@@ -53,7 +53,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.1.1"
+APP_VERSION = "1.1.2"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -289,6 +289,8 @@ class ScrollFrame(tk.Frame):
         self._drag_active = False
         self._drag_start_y = 0
         self._drag_start_fraction = 0.0
+        self._saved_yview = 0.0
+        self._saved_yoffset = 0.0
         self.body.bind("<Configure>", self._update_scroll_region)
         self.canvas.bind("<Configure>", self._update_width)
         self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
@@ -299,6 +301,31 @@ class ScrollFrame(tk.Frame):
     def clear(self) -> None:
         for child in self.body.winfo_children():
             child.destroy()
+
+    def begin_update(self) -> None:
+        self._saved_yview = self.canvas.yview()[0]
+        self._saved_yoffset = self.canvas.canvasy(0)
+        self.canvas.itemconfigure(self.window_id, state="hidden")
+
+    def end_update(self) -> None:
+        self.update_idletasks()
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self.canvas.itemconfigure(self.window_id, state="normal")
+        saved_yoffset = self._saved_yoffset
+
+        def restore_yview() -> None:
+            try:
+                scroll_region = self.canvas.bbox("all")
+                self.canvas.configure(scrollregion=scroll_region)
+                if scroll_region:
+                    content_height = max(1, scroll_region[3] - scroll_region[1])
+                    self.canvas.yview_moveto(max(0.0, saved_yoffset - scroll_region[1]) / content_height)
+            except tk.TclError:
+                return
+
+        restore_yview()
+        self.after_idle(restore_yview)
+        self.after(40, restore_yview)
 
     def _update_scroll_region(self, _event: tk.Event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -471,6 +498,8 @@ class WorldCupFloatApp:
         self.rendered_signature: tuple | None = None
         self.tab_rendered_signatures: dict[str, tuple] = {}
         self.image_refresh_pending = False
+        self.image_refresh_after_id: str | None = None
+        self.render_in_progress = False
         self.tab_switching = False
         self.window_visible = True
         self.context_menu: tk.Menu | None = None
@@ -1166,14 +1195,21 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             pass
 
     def _schedule_image_refresh(self) -> None:
-        if self.image_refresh_pending or not self.snapshot:
+        if not self.snapshot:
             return
         self.image_refresh_pending = True
-        self.root.after(500, self._refresh_images)
+        if self.image_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self.image_refresh_after_id)
+            except tk.TclError:
+                pass
+        self.image_refresh_after_id = self.root.after(350, self._refresh_images)
 
     def _refresh_images(self) -> None:
+        self.image_refresh_after_id = None
         self.image_refresh_pending = False
         if self.snapshot and self.root.state() != "withdrawn":
+            self._invalidate_render_cache(self.active_tab)
             self.render_active()
 
     def _team_text(self, team: Team | MatchTeam | LeaderRow) -> str:
@@ -1953,10 +1989,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         def worker() -> None:
             try:
                 snapshot = self.provider.load_all(force=force)
-                self.root.after(0, lambda: self._apply_snapshot(snapshot, quiet=quiet))
+                self._post_ui(lambda current=snapshot: self._apply_snapshot(current, quiet=quiet))
             except Exception as exc:
                 if not quiet or self.snapshot is None:
-                    self.root.after(0, lambda: self._set_status_text(f"同步失败: {exc}"))
+                    self._post_ui(lambda error=exc: self._set_status_text(f"同步失败: {error}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2191,6 +2227,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.select_tab("team")
 
     def render_active(self) -> None:
+        if self.render_in_progress:
+            return
         if not self.snapshot:
             self._render_loading(self.tabs[self.active_tab])
             return
@@ -2198,22 +2236,33 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if not self._tab_needs_render(self.active_tab):
             self.rendered_signature = current_signature
             return
-        self.match_labels.clear()
-        self.standing_labels.clear()
-        self.leader_labels.clear()
-        renderers = {
-            "live": self.render_live,
-            "upcoming": self.render_upcoming,
-            "results": self.render_results,
-            "standings": self.render_standings,
-            "bracket": self.render_bracket,
-            "data": self.render_data,
-            "team": self.render_team,
-        }
-        renderers[self.active_tab]()
-        self._apply_fonts_to_tree(self.tabs[self.active_tab])
-        self.rendered_signature = current_signature
-        self.tab_rendered_signatures[self.active_tab] = current_signature
+        frame = self.tabs[self.active_tab]
+        self.render_in_progress = True
+        frame.begin_update()
+        try:
+            self.match_labels.clear()
+            self.standing_labels.clear()
+            self.leader_labels.clear()
+            renderers = {
+                "live": self.render_live,
+                "upcoming": self.render_upcoming,
+                "results": self.render_results,
+                "standings": self.render_standings,
+                "bracket": self.render_bracket,
+                "data": self.render_data,
+                "team": self.render_team,
+            }
+            renderers[self.active_tab]()
+            self._apply_fonts_to_tree(frame)
+            frame.end_update()
+            self.rendered_signature = current_signature
+            self.tab_rendered_signatures[self.active_tab] = current_signature
+        finally:
+            self.render_in_progress = False
+            try:
+                frame.canvas.itemconfigure(frame.window_id, state="normal")
+            except tk.TclError:
+                pass
 
     def _render_loading(self, frame: ScrollFrame) -> None:
         frame.clear()
