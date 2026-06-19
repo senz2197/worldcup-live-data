@@ -53,7 +53,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -2689,10 +2689,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
         width = min(330, max(286, self.root.winfo_screenwidth() // 5))
         visible_matches = matches[:4]
-        height = 74 + len(visible_matches) * 56 + (24 if len(matches) > len(visible_matches) else 0)
         x = max(18, self.root.winfo_screenwidth() - width - 24)
-        y = max(18, self.root.winfo_screenheight() - height - 64)
-        popup.geometry(f"{width}x{height}+{x}+{y}")
+        popup.geometry(f"{width}x1+{x}+18")
 
         shell = tk.Frame(popup, bg=PANEL, padx=12, pady=11, highlightthickness=1, highlightbackground=LINE)
         shell.pack(fill="both", expand=True, padx=1, pady=1)
@@ -2754,6 +2752,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
         self._bind_notification_close(popup)
         self._apply_fonts_to_tree(popup)
+        popup.update_idletasks()
+        height = min(
+            popup.winfo_screenheight() - 82,
+            max(110, shell.winfo_reqheight() + 2),
+        )
+        y = max(18, popup.winfo_screenheight() - height - 64)
+        popup.geometry(f"{width}x{height}+{x}+{y}")
         popup.deiconify()
         popup.lift()
 
