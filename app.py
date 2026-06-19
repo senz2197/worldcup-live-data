@@ -11,6 +11,7 @@ import tempfile
 import threading
 import traceback
 import urllib.request
+import weakref
 import zipfile
 from collections import deque
 from datetime import datetime, timezone
@@ -53,7 +54,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.1.3"
+APP_VERSION = "1.1.4"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -280,6 +281,9 @@ class ImageCache:
 
 
 class ScrollFrame(tk.Frame):
+    _instances: weakref.WeakSet = weakref.WeakSet()
+    _bound_roots: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
     def __init__(self, parent: tk.Widget, bg: str = BG) -> None:
         super().__init__(parent, bg=bg)
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
@@ -291,15 +295,30 @@ class ScrollFrame(tk.Frame):
         self._drag_start_fraction = 0.0
         self._saved_yview = 0.0
         self._saved_yoffset = 0.0
-        self._repaint_after_id: str | None = None
+        self._wheel_delta = 0
+        self._wheel_after_id: str | None = None
         self._scroll_idle_after_id: str | None = None
         self.scroll_active = False
+        ScrollFrame._instances.add(self)
         self.body.bind("<Configure>", self._update_scroll_region)
         self.canvas.bind("<Configure>", self._update_width)
-        self.bind_all("<MouseWheel>", self._on_mousewheel, add="+")
-        self.bind_all("<ButtonPress-1>", self._start_content_drag, add="+")
-        self.bind_all("<B1-Motion>", self._drag_content, add="+")
-        self.bind_all("<ButtonRelease-1>", self._stop_content_drag, add="+")
+        root = self._root()
+        if root not in ScrollFrame._bound_roots:
+            root.bind_all("<MouseWheel>", lambda event: ScrollFrame._dispatch("_on_mousewheel", event), add="+")
+            root.bind_all("<ButtonPress-1>", lambda event: ScrollFrame._dispatch("_start_content_drag", event), add="+")
+            root.bind_all("<B1-Motion>", lambda event: ScrollFrame._dispatch("_drag_content", event), add="+")
+            root.bind_all("<ButtonRelease-1>", lambda event: ScrollFrame._dispatch("_stop_content_drag", event), add="+")
+            ScrollFrame._bound_roots[root] = True
+
+    @classmethod
+    def _dispatch(cls, method_name: str, event: tk.Event):
+        for frame in tuple(cls._instances):
+            try:
+                if frame.winfo_exists() and frame._contains_widget(event.widget):
+                    return getattr(frame, method_name)(event)
+            except tk.TclError:
+                continue
+        return None
 
     def clear(self) -> None:
         for child in self.body.winfo_children():
@@ -308,12 +327,8 @@ class ScrollFrame(tk.Frame):
     def begin_update(self) -> None:
         self._saved_yview = self.canvas.yview()[0]
         self._saved_yoffset = self.canvas.canvasy(0)
-        self.canvas.itemconfigure(self.window_id, state="hidden")
 
     def end_update(self) -> None:
-        self.update_idletasks()
-        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-        self.canvas.itemconfigure(self.window_id, state="normal")
         saved_yoffset = self._saved_yoffset
 
         def restore_yview() -> None:
@@ -326,9 +341,7 @@ class ScrollFrame(tk.Frame):
             except tk.TclError:
                 return
 
-        restore_yview()
         self.after_idle(restore_yview)
-        self.after(40, restore_yview)
 
     def _update_scroll_region(self, _event: tk.Event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -337,29 +350,56 @@ class ScrollFrame(tk.Frame):
         self.canvas.itemconfigure(self.window_id, width=event.width)
 
     def _on_mousewheel(self, event: tk.Event) -> None:
-        if self.winfo_viewable() and self._contains_widget(event.widget):
-            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            self._mark_scrolling()
-            self._schedule_repaint()
+        try:
+            viewable = self.winfo_viewable()
+        except tk.TclError:
+            return None
+        if viewable and self._contains_widget(event.widget):
+            self._wheel_delta += event.delta
+            if self._wheel_after_id is None:
+                self._wheel_after_id = self.after(16, self._flush_mousewheel)
             return "break"
+        return None
+
+    def _flush_mousewheel(self) -> None:
+        self._wheel_after_id = None
+        delta = self._wheel_delta
+        self._wheel_delta = 0
+        if not delta:
+            return
+        units = int(round(-delta / 120))
+        if units == 0:
+            units = -1 if delta > 0 else 1
+        try:
+            self.canvas.yview_scroll(units, "units")
+            self._mark_scrolling()
+        except tk.TclError:
+            return
 
     def _contains_widget(self, widget: tk.Widget) -> bool:
-        if widget.winfo_toplevel() is not self.winfo_toplevel():
+        try:
+            if widget.winfo_toplevel() is not self.winfo_toplevel():
+                return False
+            current = widget
+            while current is not None:
+                if current in (self.canvas, self.body):
+                    return True
+                current = getattr(current, "master", None)
             return False
-        current = widget
-        while current is not None:
-            if current in (self.canvas, self.body):
-                return True
-            current = getattr(current, "master", None)
-        return False
+        except tk.TclError:
+            return False
 
     def _is_interactive_drag_widget(self, widget: tk.Widget) -> bool:
         interactive_types = (tk.Entry, tk.Text, tk.Checkbutton, tk.Button, tk.Scale, ttk.Combobox, FlatSlider)
         return isinstance(widget, interactive_types)
 
     def _start_content_drag(self, event: tk.Event) -> None:
+        try:
+            viewable = self.winfo_viewable()
+        except tk.TclError:
+            return
         if (
-            not self.winfo_viewable()
+            not viewable
             or not self._contains_widget(event.widget)
             or self._is_interactive_drag_widget(event.widget)
         ):
@@ -369,7 +409,11 @@ class ScrollFrame(tk.Frame):
         self._drag_start_fraction = self.canvas.yview()[0]
 
     def _drag_content(self, event: tk.Event) -> None:
-        if not self._drag_active or not self.winfo_viewable():
+        try:
+            viewable = self.winfo_viewable()
+        except tk.TclError:
+            return
+        if not self._drag_active or not viewable:
             return
         scroll_region = self.canvas.bbox("all")
         if not scroll_region:
@@ -384,13 +428,11 @@ class ScrollFrame(tk.Frame):
         target_offset = max(0, min(scrollable_height, start_offset - pointer_delta))
         self.canvas.yview_moveto(target_offset / content_height)
         self._mark_scrolling()
-        self._schedule_repaint()
 
     def _stop_content_drag(self, _event: tk.Event) -> None:
         if not self._drag_active:
             return
         self._drag_active = False
-        self._schedule_repaint(immediate=True)
 
     def _mark_scrolling(self) -> None:
         self.scroll_active = True
@@ -404,27 +446,6 @@ class ScrollFrame(tk.Frame):
     def _finish_scrolling(self) -> None:
         self._scroll_idle_after_id = None
         self.scroll_active = False
-        self._force_repaint()
-
-    def _schedule_repaint(self, immediate: bool = False) -> None:
-        if self._repaint_after_id is not None:
-            try:
-                self.after_cancel(self._repaint_after_id)
-            except tk.TclError:
-                pass
-        delay = 0 if immediate else 16
-        self._repaint_after_id = self.after(delay, self._force_repaint)
-
-    def _force_repaint(self) -> None:
-        self._repaint_after_id = None
-        try:
-            self.canvas.update_idletasks()
-            if sys.platform.startswith("win"):
-                hwnd = self.winfo_toplevel().winfo_id()
-                flags = 0x0001 | 0x0004 | 0x0080 | 0x0100
-                ctypes.windll.user32.RedrawWindow(hwnd, None, None, flags)
-        except (tk.TclError, OSError):
-            return
 
 
 class FlatSlider(tk.Canvas):
@@ -501,6 +522,7 @@ class WorldCupFloatApp:
         enable_high_dpi_rendering()
         self.root = tk.Tk()
         self.ui_tasks: queue.Queue = queue.Queue()
+        self.refresh_lock = threading.Lock()
         self.root.after(50, self._drain_ui_tasks)
         self.config = self._load_config()
         self.available_fonts = sorted(set(tkfont.families(self.root)), key=str.casefold)
@@ -544,6 +566,8 @@ class WorldCupFloatApp:
         self.image_refresh_after_id: str | None = None
         self.render_in_progress = False
         self.tab_switching = False
+        self.pending_snapshot: tuple[Snapshot, bool] | None = None
+        self.pending_snapshot_after_id: str | None = None
         self.window_visible = True
         self.context_menu: tk.Menu | None = None
         self.settings_popup: tk.Toplevel | None = None
@@ -608,17 +632,18 @@ class WorldCupFloatApp:
         self.ui_tasks.put(callback)
 
     def _drain_ui_tasks(self) -> None:
-        try:
-            while True:
+        for _ in range(32):
+            try:
                 callback = self.ui_tasks.get_nowait()
-                try:
-                    callback()
-                except Exception:
-                    traceback.print_exc()
-        except queue.Empty:
-            pass
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except Exception:
+                traceback.print_exc()
         try:
-            self.root.after(50, self._drain_ui_tasks)
+            delay = 10 if not self.ui_tasks.empty() else 50
+            self.root.after(delay, self._drain_ui_tasks)
         except tk.TclError:
             pass
 
@@ -1211,16 +1236,23 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
     def _bind_wrap(self, label: tk.Label, reserve: int = 0, minimum: int = 80, maximum: int = 900) -> tk.Label:
         parent = label.master
+        state = {"wraplength": None, "after_id": None}
 
         def update(event: tk.Event | None = None) -> None:
+            state["after_id"] = None
             try:
                 if not label.winfo_exists():
                     return
                 width = event.width if event is not None and event.widget == parent else parent.winfo_width()
                 if width <= 1:
-                    label.after(50, update)
+                    if state["after_id"] is None:
+                        state["after_id"] = label.after(50, update)
                     return
-                label.configure(wraplength=max(minimum, min(maximum, width - reserve)))
+                wraplength = max(minimum, min(maximum, width - reserve))
+                if state["wraplength"] == wraplength:
+                    return
+                state["wraplength"] = wraplength
+                label.configure(wraplength=wraplength)
             except tk.TclError:
                 return
 
@@ -2031,6 +2063,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         return self.tab_rendered_signatures.get(key) != self._active_signature(tab=key)
 
     def refresh_data(self, force: bool = False, quiet: bool = True) -> None:
+        if not self.refresh_lock.acquire(blocking=False):
+            return
         if not quiet and self.snapshot is None:
             self._set_status_text("正在加载赛事数据...")
 
@@ -2041,6 +2075,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             except Exception as exc:
                 if not quiet or self.snapshot is None:
                     self._post_ui(lambda error=exc: self._set_status_text(f"同步失败: {error}"))
+            finally:
+                self.refresh_lock.release()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2064,8 +2100,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _apply_snapshot(self, snapshot: Snapshot, quiet: bool = True) -> None:
         active_frame = self.tabs.get(self.active_tab)
         if active_frame is not None and active_frame.scroll_active:
-            self.root.after(220, lambda current=snapshot: self._apply_snapshot(current, quiet=quiet))
+            self.pending_snapshot = (snapshot, quiet)
+            if self.pending_snapshot_after_id is None:
+                self.pending_snapshot_after_id = self.root.after(220, self._apply_pending_snapshot)
             return
+        self.pending_snapshot = None
+        if self.pending_snapshot_after_id is not None:
+            try:
+                self.root.after_cancel(self.pending_snapshot_after_id)
+            except tk.TclError:
+                pass
+            self.pending_snapshot_after_id = None
         had_snapshot = self.snapshot is not None
         old_signatures = {
             tab: self._active_signature(self.snapshot, tab=tab)
@@ -2097,6 +2142,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self._update_visible_text()
         self._maybe_show_match_notification(snapshot)
         self.images.prefetch(self._all_logo_urls(snapshot))
+
+    def _apply_pending_snapshot(self) -> None:
+        self.pending_snapshot_after_id = None
+        pending = self.pending_snapshot
+        if pending is None:
+            return
+        snapshot, quiet = pending
+        self._apply_snapshot(snapshot, quiet=quiet)
 
     def _active_signature(self, snapshot: Snapshot | None = None, tab: str | None = None) -> tuple:
         snapshot = snapshot or self.snapshot
@@ -2311,10 +2364,6 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.tab_rendered_signatures[self.active_tab] = current_signature
         finally:
             self.render_in_progress = False
-            try:
-                frame.canvas.itemconfigure(frame.window_id, state="normal")
-            except tk.TclError:
-                pass
 
     def _render_loading(self, frame: ScrollFrame) -> None:
         frame.clear()
@@ -2601,36 +2650,39 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _match_card(self, parent: tk.Widget, match: Match, live: bool = False) -> None:
         card = tk.Frame(parent, bg=PANEL, padx=12, pady=11, highlightthickness=1, highlightbackground=LINE)
         card.pack(fill="x", pady=6)
+        header = tk.Frame(card, bg=PANEL, height=22)
+        header.pack(fill="x", pady=(0, 10))
+        header.pack_propagate(False)
         layout = tk.Frame(card, bg=PANEL)
         layout.pack(fill="x")
         layout.columnconfigure(0, weight=1, uniform="match_team", minsize=72)
         layout.columnconfigure(1, weight=0, minsize=82)
         layout.columnconfigure(2, weight=1, uniform="match_team", minsize=72)
-        layout.rowconfigure(1, minsize=82)
+        layout.rowconfigure(0, minsize=82)
         status_color = LIVE if match.is_live or live else (ACCENT if match.completed else WARNING)
         status = "LIVE " + match.status_text if match.is_live else (match.status_text or ("完赛" if match.completed else "未开始"))
         when = match.date.strftime("%m-%d %H:%M") if match.date else "时间待定"
         group = f" · {match.group} 组" if match.group else ""
         round_label = tk.Label(
-            layout,
+            header,
             text=f"{match.round_name}{group}",
             bg=PANEL,
             fg=ACCENT,
             anchor="center",
             font=("Microsoft YaHei UI", 9, "bold"),
         )
-        round_label.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         status_label = tk.Label(
-            layout,
+            header,
             text=f"{when} · {status}",
             bg=PANEL,
             fg=status_color,
             anchor="e",
             font=("Microsoft YaHei UI", 9, "bold"),
         )
-        status_label.grid(row=0, column=1, columnspan=2, sticky="e", pady=(0, 10))
+        round_label.place(x=0, y=0, width=1, relheight=1)
+        status_label.place(relx=1.0, x=-1, y=0, width=1, relheight=1, anchor="ne")
 
-        home_labels = self._score_team_block(layout, match.home, align="left", column=0, row=1)
+        home_labels = self._score_team_block(layout, match.home, align="left", column=0, row=0)
         scoreline_label = tk.Label(
             layout,
             text=self._scoreline(match),
@@ -2641,12 +2693,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             font=("Microsoft YaHei UI", 20, "bold"),
         )
         scoreline_label._worldcup_score_font = True
-        scoreline_label.grid(row=1, column=1, sticky="nsew", padx=3)
-        away_labels = self._score_team_block(layout, match.away, align="right", column=2, row=1)
+        scoreline_label.grid(row=0, column=1, sticky="nsew", padx=3)
+        away_labels = self._score_team_block(layout, match.away, align="right", column=2, row=0)
 
         def align_header(_event: tk.Event | None = None) -> None:
             try:
-                away_width = layout.grid_bbox(2, 1)[2]
+                header_width = header.winfo_width()
+                if header_width <= 1:
+                    return
+                center_width = 82
+                team_width = max(72, (header_width - center_width) // 2)
                 status_font = tkfont.Font(root=self.root, font=status_label.cget("font"))
                 font_actual = status_font.actual()
                 font_family = font_actual.get("family", self.ui_font_var.get())
@@ -2661,13 +2717,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 )
                 status_width = normal_font.measure(status_label.cget("text")) + 4
                 round_width = normal_font.measure(round_label.cget("text")) + 4
-                home_width = layout.grid_bbox(0, 1)[2]
-                score_width = layout.grid_bbox(1, 1)[2]
-                left_edge = round_width > max(0, home_width - 16)
-                right_edge = status_width > max(0, away_width - 16)
+                centered_available = max(1, team_width - 8)
+                left_edge = round_width > centered_available
+                right_edge = status_width > centered_available
                 font_size = 9
-                left_available = home_width - 4
-                right_available = (score_width + away_width if right_edge else away_width) - 4
+                left_available = centered_available
+                right_available = (
+                    header_width - team_width - 8
+                    if right_edge
+                    else centered_available
+                )
                 while font_size > 6:
                     probe = tkfont.Font(
                         root=self.root,
@@ -2685,6 +2744,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     "edge" if left_edge else "center",
                     "edge" if right_edge else "center",
                     font_size,
+                    team_width,
+                    header_width,
                 )
                 if getattr(status_label, "_worldcup_alignment", None) == target:
                     return
@@ -2696,21 +2757,33 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     font=(font_family, font_size, font_weight, font_slant),
                     wraplength=0,
                     justify="right" if right_edge else "center",
+                    anchor="e" if right_edge else "center",
                 )
-                status_label.grid_forget()
                 if right_edge:
-                    status_label.configure(anchor="e")
-                    status_label.grid(row=0, column=1, columnspan=2, sticky="ew", pady=(0, 10))
+                    status_x = team_width
+                    status_area_width = header_width - team_width
                 else:
-                    status_label.configure(anchor="center")
-                    status_label.grid(row=0, column=2, sticky="ew", pady=(0, 10))
+                    status_area_width = team_width
+                    status_x = header_width - team_width
+                round_label.place_configure(x=0, width=team_width)
+                status_label.place_configure(
+                    relx=0,
+                    x=status_x,
+                    width=max(1, status_area_width),
+                    anchor="nw",
+                )
+                team_wraplength = max(68, min(132, team_width - 4))
+                for team_label in (home_labels["name"], away_labels["name"]):
+                    if getattr(team_label, "_worldcup_wraplength", None) != team_wraplength:
+                        team_label._worldcup_wraplength = team_wraplength
+                        team_label.configure(wraplength=team_wraplength)
                 status_label._worldcup_alignment = target
             except tk.TclError:
                 return
 
-        layout.bind("<Configure>", align_header, add="+")
-        layout._worldcup_align_header = align_header
-        layout.after_idle(align_header)
+        header.bind("<Configure>", align_header, add="+")
+        header._worldcup_align_header = align_header
+        header.after_idle(align_header)
         labels = {
             "round": round_label,
             "status": status_label,
@@ -3025,9 +3098,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             font=("Microsoft YaHei UI", 10, "bold"),
             anchor=text_anchor,
             justify=justify,
+            width=1,
+            wraplength=110,
         )
         name_label.pack(fill="x")
-        self._bind_wrap(name_label, reserve=4, minimum=68, maximum=132)
         self._bind_team_open(name_label, team.id)
         code_label = tk.Label(
             text_box,
