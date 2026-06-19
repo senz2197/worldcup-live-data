@@ -84,7 +84,13 @@ class CommentaryService:
         if cached:
             latest_cached = max(cached)
             new_entries = [entry for entry in missing_all if entry.sequence > latest_cached]
-            missing = new_entries[-12:] if new_entries else missing_all[:20]
+            newest = new_entries[-6:]
+            newest_sequences = {entry.sequence for entry in newest}
+            oldest = [
+                entry for entry in missing_all
+                if entry.sequence not in newest_sequences
+            ][: max(0, 20 - len(newest))]
+            missing = oldest + newest
         else:
             missing = entries[-12:]
         if not missing:
