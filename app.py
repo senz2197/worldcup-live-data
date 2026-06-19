@@ -20,7 +20,8 @@ from tkinter import colorchooser, ttk
 import tkinter as tk
 import tkinter.font as tkfont
 
-from data_provider import DataProvider, LeaderRow, Leaderboard, Match, MatchTeam, Player, Snapshot, Team
+from commentary_service import CommentaryService
+from data_provider import CommentaryEntry, DataProvider, LeaderRow, Leaderboard, Match, MatchTeam, Player, Snapshot, Team
 from localization import NameLocalizer
 
 
@@ -54,7 +55,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.1.4"
+APP_VERSION = "1.2.0"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -184,6 +185,7 @@ def runtime_dir() -> Path:
 
 
 CONFIG_PATH = runtime_dir() / "config.json"
+SECRETS_PATH = runtime_dir() / "secrets.json"
 
 
 def enable_high_dpi_rendering() -> None:
@@ -525,6 +527,7 @@ class WorldCupFloatApp:
         self.refresh_lock = threading.Lock()
         self.root.after(50, self._drain_ui_tasks)
         self.config = self._load_config()
+        self.secrets = self._load_secrets()
         self.available_fonts = sorted(set(tkfont.families(self.root)), key=str.casefold)
         self.ui_font_var = tk.StringVar(value=self._valid_font_name(self.config.get("ui_font"), DEFAULT_UI_FONT))
         self.score_font_var = tk.StringVar(value=self._valid_font_name(self.config.get("score_font"), DEFAULT_SCORE_FONT))
@@ -544,6 +547,7 @@ class WorldCupFloatApp:
         self.root.bind_all("<ButtonRelease-1>", self._global_pointer_release, add="+")
 
         self.provider = DataProvider()
+        self.commentary_service = CommentaryService(self.provider.cache_dir)
         self.root.report_callback_exception = self._log_tk_exception
         self.images = ImageCache(self.root, self.provider.cache_dir / "images", on_loaded=self._schedule_image_refresh)
         self.localizer = NameLocalizer()
@@ -558,6 +562,19 @@ class WorldCupFloatApp:
         self.roster_errors: dict[str, str | None] = {}
         self.loading_rosters: set[str] = set()
         self.match_labels: dict[str, list[dict[str, tk.Label]]] = {}
+        self.commentary_entries: dict[str, list[CommentaryEntry]] = {}
+        self.commentary_texts: dict[str, dict[int, str]] = {}
+        self.commentary_errors: dict[str, str] = {}
+        self.commentary_loading: set[str] = set()
+        self.summary_texts: dict[str, str] = {}
+        self.summary_errors: dict[str, str] = {}
+        self.summary_loading: set[str] = set()
+        self.summary_requested: set[str] = set()
+        self.live_match_ids: set[str] = set()
+        self.commentary_labels: dict[str, list[tk.Label]] = {}
+        self.detail_commentary_panels: dict[str, tk.Frame] = {}
+        self.detail_summary_labels: dict[str, tk.Label] = {}
+        self.match_detail_scroll: ScrollFrame | None = None
         self.standing_labels: dict[tuple[str, str], tk.Label] = {}
         self.leader_labels: dict[tuple[str, str], tk.Label] = {}
         self.rendered_signature: tuple | None = None
@@ -608,6 +625,11 @@ class WorldCupFloatApp:
         self.quick_refresh_var = tk.BooleanVar(value=bool(self.config.get("quick_refresh", False)))
         self.show_status_var = tk.BooleanVar(value=bool(self.config.get("show_status", True)))
         self.match_notifications_var = tk.BooleanVar(value=bool(self.config.get("match_notifications", True)))
+        self.ai_commentary_var = tk.BooleanVar(value=bool(self.config.get("ai_commentary", True)))
+        self.ai_translate_raw_var = tk.BooleanVar(value=bool(self.config.get("ai_translate_raw", False)))
+        self.commentary_lines_var = tk.IntVar(value=self._valid_commentary_lines(self.config.get("commentary_lines"), 3))
+        self.agnes_api_key_var = tk.StringVar(value=str(self.secrets.get("agnes_api_key") or ""))
+        self.ai_status_var = tk.StringVar(value="Agnes AI 已启用" if self.agnes_api_key_var.get().strip() else "未设置 API Key，将显示原始数据")
         self.live_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("live_refresh_seconds"), 5))
         self.default_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("default_refresh_seconds"), 15))
         self.update_status_var = tk.StringVar(value=f"当前版本 {APP_VERSION}")
@@ -656,6 +678,28 @@ class WorldCupFloatApp:
         except Exception:
             return {}
 
+    def _load_secrets(self) -> dict[str, str]:
+        if not SECRETS_PATH.exists():
+            return {}
+        try:
+            data = json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_secrets(self) -> None:
+        try:
+            SECRETS_PATH.write_text(
+                json.dumps(
+                    {"agnes_api_key": self.agnes_api_key_var.get().strip()},
+                    ensure_ascii=False,
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     def _save_config(self) -> None:
         try:
             palette = {key: self._valid_color(self.palette_colors.get(key), PALETTE_PRESETS["codex"][key]) for key in PALETTE_KEYS}
@@ -670,6 +714,9 @@ class WorldCupFloatApp:
                         "quick_refresh": bool(self.quick_refresh_var.get()) if hasattr(self, "quick_refresh_var") else False,
                         "show_status": bool(self.show_status_var.get()) if hasattr(self, "show_status_var") else True,
                         "match_notifications": bool(self.match_notifications_var.get()) if hasattr(self, "match_notifications_var") else True,
+                        "ai_commentary": bool(self.ai_commentary_var.get()) if hasattr(self, "ai_commentary_var") else True,
+                        "ai_translate_raw": bool(self.ai_translate_raw_var.get()) if hasattr(self, "ai_translate_raw_var") else False,
+                        "commentary_lines": self._valid_commentary_lines(self.commentary_lines_var.get(), 3) if hasattr(self, "commentary_lines_var") else 3,
                         "topmost": bool(self.topmost_var.get()) if hasattr(self, "topmost_var") else True,
                         "use_english": bool(self.use_english_var.get()) if hasattr(self, "use_english_var") else False,
                         "alpha": round(float(self.alpha_var.get()), 2) if hasattr(self, "alpha_var") else 0.93,
@@ -689,6 +736,7 @@ class WorldCupFloatApp:
 
     def _close_settings(self) -> None:
         self._save_config()
+        self._save_secrets()
         if self.settings_popup is not None and self.settings_popup.winfo_exists():
             self.settings_popup.destroy()
         self.settings_popup = None
@@ -717,6 +765,13 @@ class WorldCupFloatApp:
         except (TypeError, ValueError):
             return fallback
         return max(3, min(seconds, 180))
+
+    def _valid_commentary_lines(self, value, fallback: int = 3) -> int:
+        try:
+            lines = int(value)
+        except (TypeError, ValueError):
+            return fallback
+        return max(1, min(lines, 8))
 
     def _valid_font_name(self, value: str | None, fallback: str) -> str:
         value = str(value or "").strip()
@@ -956,6 +1011,51 @@ class WorldCupFloatApp:
         self.live_refresh_seconds_var.set(self._valid_seconds(self.live_refresh_seconds_var.get(), 5))
         self.default_refresh_seconds_var.set(self._valid_seconds(self.default_refresh_seconds_var.get(), 15))
         self._save_config()
+
+    def _save_commentary_settings(self, *_args) -> None:
+        self.commentary_lines_var.set(self._valid_commentary_lines(self.commentary_lines_var.get(), 3))
+        self._save_config()
+        self._save_secrets()
+        if self.active_tab == "live":
+            self._invalidate_render_cache("live")
+            self.render_active()
+        else:
+            self._update_all_commentary_labels()
+        if self.snapshot:
+            self._refresh_live_commentary(self.snapshot, force=True)
+
+    def _toggle_ai_commentary(self) -> None:
+        self._save_config()
+        self.commentary_texts.clear()
+        self._update_all_commentary_labels()
+        if self.snapshot and (self.ai_commentary_var.get() or self.ai_translate_raw_var.get()):
+            self._refresh_live_commentary(self.snapshot, force=True)
+
+    def _toggle_raw_translation(self) -> None:
+        self._save_config()
+        self.commentary_texts.clear()
+        self._update_all_commentary_labels()
+        if not self.ai_commentary_var.get() and self.ai_translate_raw_var.get() and self.snapshot:
+            self._refresh_live_commentary(self.snapshot, force=True)
+
+    def _test_agnes_connection(self) -> None:
+        key = self.agnes_api_key_var.get().strip()
+        self._save_config()
+        self._save_secrets()
+        if not key:
+            self.ai_status_var.set("请先填写 Agnes API Key")
+            return
+        self.ai_status_var.set("正在测试 Agnes AI...")
+
+        def worker() -> None:
+            try:
+                result = self.commentary_service.test(key)
+                status = "Agnes AI 连接成功" if result else "Agnes AI 返回为空"
+            except Exception as exc:
+                status = f"连接失败：{exc}"
+            self._post_ui(lambda text=status: self.ai_status_var.set(text))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _version_tuple(self, value: str) -> tuple[int, ...]:
         parts = []
@@ -1980,6 +2080,75 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             tk.Label(value_row, text="秒", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(5, 0))
             entry.bind("<Return>", self._save_refresh_settings)
             entry.bind("<FocusOut>", self._save_refresh_settings)
+
+        tk.Label(body, text="实时解说", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+        commentary_panel = tk.Frame(body, bg=PANEL_2, padx=9, pady=8, highlightthickness=1, highlightbackground=LINE)
+        commentary_panel.pack(fill="x", pady=(3, 10))
+        tk.Checkbutton(
+            commentary_panel,
+            text="使用 Agnes AI 生成中文解说",
+            variable=self.ai_commentary_var,
+            command=self._toggle_ai_commentary,
+            bg=PANEL_2,
+            fg=TEXT,
+            selectcolor=PANEL_3,
+            activebackground=PANEL_2,
+            activeforeground=TEXT,
+        ).pack(anchor="w")
+        tk.Checkbutton(
+            commentary_panel,
+            text="原始数据模式下使用 AI 中文翻译",
+            variable=self.ai_translate_raw_var,
+            command=self._toggle_raw_translation,
+            bg=PANEL_2,
+            fg=TEXT,
+            selectcolor=PANEL_3,
+            activebackground=PANEL_2,
+            activeforeground=TEXT,
+        ).pack(anchor="w", pady=(5, 0))
+        lines_row = tk.Frame(commentary_panel, bg=PANEL_2)
+        lines_row.pack(fill="x", pady=(7, 0))
+        tk.Label(lines_row, text="主界面显示行数", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side="left")
+        lines_entry = tk.Entry(
+            lines_row,
+            textvariable=self.commentary_lines_var,
+            bg=PANEL_3,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            width=4,
+            justify="center",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        lines_entry.pack(side="right", ipady=3)
+        lines_entry.bind("<Return>", self._save_commentary_settings)
+        lines_entry.bind("<FocusOut>", self._save_commentary_settings)
+        tk.Label(commentary_panel, text="Agnes API Key", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(8, 3))
+        key_row = tk.Frame(commentary_panel, bg=PANEL_2)
+        key_row.pack(fill="x")
+        key_entry = tk.Entry(
+            key_row,
+            textvariable=self.agnes_api_key_var,
+            show="•",
+            bg=PANEL_3,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=("Microsoft YaHei UI", 9),
+        )
+        key_entry.pack(side="left", fill="x", expand=True, ipady=4)
+        key_entry.bind("<Return>", self._save_commentary_settings)
+        key_entry.bind("<FocusOut>", self._save_commentary_settings)
+        self._text_button(key_row, "测试", self._test_agnes_connection).pack(side="left", padx=(7, 0))
+        tk.Label(
+            commentary_panel,
+            textvariable=self.ai_status_var,
+            bg=PANEL_2,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            font=("Microsoft YaHei UI", 8),
+        ).pack(fill="x", pady=(6, 0))
         tk.Checkbutton(
             body,
             text="保持置顶",
@@ -2112,6 +2281,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 pass
             self.pending_snapshot_after_id = None
         had_snapshot = self.snapshot is not None
+        previous_live_ids = {
+            match.id for match in self.snapshot.matches if match.is_live
+        } if self.snapshot else set()
         old_signatures = {
             tab: self._active_signature(self.snapshot, tab=tab)
             for tab in self.tab_rendered_signatures
@@ -2142,6 +2314,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self._update_visible_text()
         self._maybe_show_match_notification(snapshot)
         self.images.prefetch(self._all_logo_urls(snapshot))
+        self._refresh_live_commentary(snapshot)
+        current_live_ids = {match.id for match in snapshot.matches if match.is_live}
+        ended_ids = previous_live_ids - current_live_ids
+        for match in snapshot.matches:
+            if match.id in ended_ids and match.completed:
+                self._load_match_commentary(match, force=True, request_summary=True)
+        self.live_match_ids = current_live_ids
 
     def _apply_pending_snapshot(self) -> None:
         self.pending_snapshot_after_id = None
@@ -2346,6 +2525,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         frame.begin_update()
         try:
             self.match_labels.clear()
+            self.commentary_labels.clear()
             self.standing_labels.clear()
             self.leader_labels.clear()
             renderers = {
@@ -2380,6 +2560,204 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             return
         for match in matches:
             self._match_card(frame.body, match, live=mode == "live")
+
+    def _refresh_live_commentary(self, snapshot: Snapshot, force: bool = False) -> None:
+        for match in snapshot.matches:
+            if match.is_live:
+                self._load_match_commentary(match, force=force)
+
+    def _load_match_commentary(
+        self,
+        match: Match,
+        force: bool = False,
+        request_summary: bool = False,
+    ) -> None:
+        if request_summary:
+            self.summary_requested.add(match.id)
+        if match.id in self.commentary_loading:
+            return
+        self.commentary_loading.add(match.id)
+        use_ai = bool(self.ai_commentary_var.get())
+        translate_raw = bool(self.ai_translate_raw_var.get())
+        api_key = self.agnes_api_key_var.get().strip()
+
+        def worker() -> None:
+            entries, _detail, error = self.provider.get_match_commentary(
+                match.id,
+                live=match.is_live,
+                force=force,
+            )
+            mode = "narration" if use_ai else "translations"
+            translations = self.commentary_service.event_texts(match.id, mode=mode)
+            ai_error = ""
+            if entries and api_key and (use_ai or translate_raw):
+                try:
+                    if use_ai:
+                        translations = self.commentary_service.narrate_events(match, entries, api_key)
+                    else:
+                        translations = self.commentary_service.translate_events(match, entries, api_key)
+                except Exception as exc:
+                    ai_error = str(exc)
+            self._post_ui(
+                lambda current=match, rows=entries, texts=translations, detail_error=error, model_error=ai_error, summarize=request_summary:
+                self._apply_commentary_result(
+                    current,
+                    rows,
+                    texts,
+                    detail_error or model_error or "",
+                    request_summary=summarize,
+                )
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_commentary_result(
+        self,
+        match: Match,
+        entries: list[CommentaryEntry],
+        translations: dict[int, str],
+        error: str,
+        request_summary: bool = False,
+    ) -> None:
+        self.commentary_loading.discard(match.id)
+        if entries:
+            self.commentary_entries[match.id] = entries
+        self.commentary_texts[match.id] = translations
+        if error:
+            self.commentary_errors[match.id] = error
+        else:
+            self.commentary_errors.pop(match.id, None)
+        self._update_commentary_labels(match.id)
+        self._render_detail_commentary(match)
+        should_summarize = request_summary or match.id in self.summary_requested
+        self.summary_requested.discard(match.id)
+        latest_match = next(
+            (current for current in self.snapshot.matches if current.id == match.id),
+            match,
+        ) if self.snapshot else match
+        if should_summarize and latest_match.completed:
+            self._request_match_summary(latest_match)
+        elif should_summarize:
+            self.summary_requested.add(match.id)
+        mode = "narration" if self.ai_commentary_var.get() else "translations"
+        ai_enabled = self.ai_commentary_var.get() or self.ai_translate_raw_var.get()
+        detail_open = match.id in self.detail_commentary_panels
+        if (
+            not error
+            and ai_enabled
+            and self.agnes_api_key_var.get().strip()
+            and (latest_match.is_live or detail_open)
+            and self.commentary_service.needs_event_backfill(match.id, entries, mode)
+        ):
+            self.root.after(
+                3600,
+                lambda current=latest_match: self._load_match_commentary(current, force=False),
+            )
+
+    def _request_match_summary(self, match: Match) -> None:
+        if match.id in self.summary_loading:
+            return
+        entries = self.commentary_entries.get(match.id, [])
+        signature = self.commentary_service.summary_signature(match, entries)
+        cached = self.commentary_service.summary(match.id, signature)
+        if cached:
+            self.summary_texts[match.id] = cached
+            self._update_summary_label(match.id)
+            return
+        api_key = self.agnes_api_key_var.get().strip()
+        if not api_key:
+            self.summary_errors[match.id] = "未设置 Agnes API Key，暂时无法生成比赛总结。"
+            self._update_summary_label(match.id)
+            return
+        self.summary_loading.add(match.id)
+        self._update_summary_label(match.id)
+
+        def worker() -> None:
+            try:
+                text = self.commentary_service.summarize_match(match, entries, api_key)
+                error = ""
+            except Exception as exc:
+                text = ""
+                error = str(exc)
+            self._post_ui(lambda: self._apply_summary_result(match.id, text, error))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_summary_result(self, match_id: str, text: str, error: str) -> None:
+        self.summary_loading.discard(match_id)
+        if text:
+            self.summary_texts[match_id] = text
+            self.summary_errors.pop(match_id, None)
+        elif error:
+            self.summary_errors[match_id] = f"AI 总结暂不可用：{error}"
+        self._update_summary_label(match_id)
+
+    def _commentary_text(self, match_id: str, entry: CommentaryEntry) -> str:
+        if self.ai_commentary_var.get() or self.ai_translate_raw_var.get():
+            translated = self.commentary_texts.get(match_id, {}).get(entry.sequence)
+            if translated:
+                return translated
+        return entry.text
+
+    def _commentary_line(self, match_id: str, entry: CommentaryEntry, limit: int = 38) -> str:
+        prefix = f"{entry.minute} " if entry.minute else ""
+        text = f"{prefix}{self._commentary_text(match_id, entry)}".strip()
+        if len(text) > limit:
+            return text[: max(1, limit - 1)].rstrip() + "…"
+        return text
+
+    def _update_all_commentary_labels(self) -> None:
+        for match_id in tuple(self.commentary_labels):
+            self._update_commentary_labels(match_id)
+        if self.match_popup is not None and self.match_popup.winfo_exists() and self.snapshot:
+            for match in self.snapshot.matches:
+                if match.id in self.detail_commentary_panels:
+                    self._render_detail_commentary(match)
+
+    def _update_commentary_labels(self, match_id: str) -> None:
+        labels = self.commentary_labels.get(match_id, [])
+        entries = list(reversed(self.commentary_entries.get(match_id, [])))
+        for index, label in enumerate(labels):
+            if index < len(entries):
+                text = self._commentary_line(match_id, entries[index])
+                color = TEXT if index == 0 else MUTED
+            elif index == 0 and match_id in self.commentary_loading:
+                text = "正在获取实时文字直播…"
+                color = MUTED
+            elif index == 0 and self.commentary_errors.get(match_id):
+                text = "文字直播暂时不可用"
+                color = MUTED
+            else:
+                text = ""
+                color = MUTED
+            try:
+                label.configure(text=text, fg=color)
+            except tk.TclError:
+                pass
+
+    def _commentary_preview(self, parent: tk.Widget, match: Match) -> None:
+        panel = tk.Frame(parent, bg=BG, cursor="hand2")
+        panel.pack(fill="x", padx=4, pady=(0, 7))
+        line_count = self._valid_commentary_lines(self.commentary_lines_var.get(), 3)
+        labels: list[tk.Label] = []
+        for _ in range(line_count):
+            label = tk.Label(
+                panel,
+                text="",
+                bg=BG,
+                fg=MUTED,
+                anchor="w",
+                justify="left",
+                height=1,
+                font=("Microsoft YaHei UI", 8),
+                cursor="hand2",
+            )
+            label.pack(fill="x", pady=1)
+            labels.append(label)
+            self._bind_match_open(label, match)
+        self.commentary_labels[match.id] = labels
+        self._bind_match_open(panel, match)
+        self._update_commentary_labels(match.id)
 
     def render_upcoming(self) -> None:
         frame = self.tabs["upcoming"]
@@ -2795,6 +3173,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._bind_match_open(card, match)
         self._bind_match_open(layout, match)
         self._bind_match_open(scoreline_label, match)
+        if match.is_live:
+            self._commentary_preview(parent, match)
 
     def _bind_match_open(self, widget: tk.Widget, match: Match) -> None:
         widget.configure(cursor="hand2")
@@ -2806,6 +3186,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             popup.destroy()
         if popup is self.match_popup or popup is None:
             self.match_popup = None
+            self.match_detail_scroll = None
+            self.detail_commentary_panels.clear()
+            self.detail_summary_labels.clear()
 
     def _maybe_close_match_popup(self, event: tk.Event) -> None:
         if self.match_popup_opening or self.match_popup is None or not self.match_popup.winfo_exists():
@@ -2971,9 +3354,15 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._bind_drag(header)
         self._bind_drag(header_label)
         body = ScrollFrame(popup, bg=PANEL)
+        self.match_detail_scroll = body
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self._match_detail(body.body, match)
         self._apply_fonts_to_tree(popup)
+        self._load_match_commentary(
+            match,
+            force=match.is_live,
+            request_summary=match.completed,
+        )
 
     def _match_detail(self, parent: tk.Widget, match: Match) -> None:
         title = f"{self._team_text(match.home)}  {self._scoreline(match)}  {self._team_text(match.away)}"
@@ -3001,6 +3390,144 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self._bind_wrap(value_label, reserve=56, minimum=130, maximum=260)
         self._match_events_panel(parent, match)
         self._match_stats_panel(parent, match)
+        self._match_commentary_panel(parent, match)
+        if match.completed:
+            self._match_summary_panel(parent, match)
+
+    def _match_commentary_panel(self, parent: tk.Widget, match: Match) -> None:
+        tk.Label(
+            parent,
+            text="完整文字直播",
+            bg=PANEL,
+            fg=ACCENT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(anchor="w", pady=(12, 4))
+        panel = tk.Frame(parent, bg=PANEL)
+        panel.pack(fill="x")
+        self.detail_commentary_panels[match.id] = panel
+        self._render_detail_commentary(match)
+
+    def _render_detail_commentary(self, match: Match) -> None:
+        panel = self.detail_commentary_panels.get(match.id)
+        if panel is None:
+            return
+        try:
+            if not panel.winfo_exists():
+                self.detail_commentary_panels.pop(match.id, None)
+                return
+            for child in panel.winfo_children():
+                child.destroy()
+        except tk.TclError:
+            return
+        entries = self.commentary_entries.get(match.id, [])
+        if not entries:
+            if match.id in self.commentary_loading:
+                text = "正在获取完整文字直播…"
+            elif self.commentary_errors.get(match.id):
+                text = "文字直播暂时不可用，比分与比赛统计仍可正常查看。"
+            else:
+                text = "暂时没有文字直播事件。"
+            tk.Label(panel, text=text, bg=PANEL, fg=MUTED, anchor="w", justify="left").pack(fill="x", pady=5)
+            return
+        text_view = tk.Text(
+            panel,
+            bg=PANEL_2,
+            fg=TEXT,
+            insertbackground=TEXT,
+            selectbackground=PANEL_3,
+            selectforeground=TEXT,
+            wrap="word",
+            width=1,
+            height=15,
+            relief="flat",
+            bd=0,
+            highlightthickness=1,
+            highlightbackground=LINE,
+            padx=9,
+            pady=8,
+            font=("Microsoft YaHei UI", 8),
+            cursor="arrow",
+        )
+        text_view.pack(fill="x")
+        text_view.tag_configure("minute", foreground=ACCENT, font=("Microsoft YaHei UI", 8, "bold"))
+        for entry in entries:
+            text_view.insert("end", f"{entry.minute or '·'}  ", "minute")
+            text_view.insert("end", f"{self._commentary_text(match.id, entry)}\n\n")
+        text_view.configure(state="disabled")
+
+        drag_state = {"start_y": 0, "start_fraction": 0.0, "dragged": False}
+
+        def scroll_text(event: tk.Event) -> str:
+            text_view.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        def start_drag(event: tk.Event) -> str:
+            drag_state["start_y"] = event.y_root
+            drag_state["start_fraction"] = text_view.yview()[0]
+            drag_state["dragged"] = False
+            return "break"
+
+        def drag_text(event: tk.Event) -> str:
+            delta = event.y_root - drag_state["start_y"]
+            if abs(delta) > 4:
+                drag_state["dragged"] = True
+            line_count = max(1, int(text_view.index("end-1c").split(".")[0]))
+            content_height = max(text_view.winfo_height() + 1, line_count * 18)
+            scrollable = max(1, content_height - text_view.winfo_height())
+            target = drag_state["start_fraction"] - delta / content_height
+            maximum = scrollable / content_height
+            text_view.yview_moveto(max(0.0, min(maximum, target)))
+            return "break"
+
+        text_view.bind("<MouseWheel>", scroll_text)
+        text_view.bind("<ButtonPress-1>", start_drag)
+        text_view.bind("<B1-Motion>", drag_text)
+        text_view.bind("<ButtonRelease-1>", lambda _event: "break")
+
+    def _match_summary_panel(self, parent: tk.Widget, match: Match) -> None:
+        tk.Label(
+            parent,
+            text="AI 比赛总结",
+            bg=PANEL,
+            fg=ACCENT,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        ).pack(anchor="w", pady=(12, 4))
+        summary = tk.Label(
+            parent,
+            text="正在准备比赛总结…",
+            bg=PANEL_2,
+            fg=TEXT,
+            anchor="w",
+            justify="left",
+            padx=9,
+            pady=8,
+            font=("Microsoft YaHei UI", 9),
+        )
+        summary.pack(fill="x", pady=(0, 4))
+        self.detail_summary_labels[match.id] = summary
+        self._bind_wrap(summary, reserve=18, minimum=160, maximum=300)
+        self._update_summary_label(match.id)
+
+    def _update_summary_label(self, match_id: str) -> None:
+        label = self.detail_summary_labels.get(match_id)
+        if label is None:
+            return
+        if match_id in self.summary_loading:
+            text = "正在生成比赛总结…"
+            color = MUTED
+        elif self.summary_texts.get(match_id):
+            text = self.summary_texts[match_id]
+            color = TEXT
+        elif self.summary_errors.get(match_id):
+            text = self.summary_errors[match_id]
+            color = MUTED
+        else:
+            text = "等待获取完整比赛数据…"
+            color = MUTED
+        try:
+            label.configure(text=text, fg=color)
+        except tk.TclError:
+            self.detail_summary_labels.pop(match_id, None)
 
     def _match_events_panel(self, parent: tk.Widget, match: Match) -> None:
         events = [event for event in match.events if event.get("kind") in {"goal", "yellow", "red"}]

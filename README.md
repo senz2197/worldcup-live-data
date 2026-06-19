@@ -34,6 +34,9 @@ WorldCupFloat_Portable.zip
 - Independent normal UI font and score font selectors
 - Theme presets and editable colors with locally persisted settings
 - One-click GitHub update that preserves the current local configuration
+- ESPN play-by-play commentary shown directly below each live score card
+- Agnes 2.0 Flash Chinese AI commentary with raw-data and translation modes
+- Full match commentary timelines and cached AI post-match summaries
 
 ## Data Sources
 
@@ -80,6 +83,9 @@ dist\WorldCupFloat.exe
 ```
 
 The portable package includes the EXE, assets, configuration, and current cache.
+Agnes API keys are stored only in the local `secrets.json` file. This file is
+excluded from Git and release packages. Without a key, commentary automatically
+falls back to the original ESPN play-by-play text.
 
 ## Smoke Test
 

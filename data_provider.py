@@ -29,6 +29,7 @@ ESPN_TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.worl
 ESPN_STANDINGS_URL = "https://site.web.api.espn.com/apis/v2/sports/soccer/fifa.world/standings"
 ESPN_STATS_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/statistics"
 ESPN_ROSTER_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/teams/{team_id}/roster"
+ESPN_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/summary?event={match_id}"
 
 WORLDCUP26_GAMES_URL = "https://worldcup26.ir/get/games"
 WORLDCUP26_TEAMS_URL = "https://worldcup26.ir/get/teams"
@@ -103,6 +104,7 @@ class Match:
     detail: str = ""
     statistics: dict[str, dict[str, str]] = field(default_factory=dict)
     events: list[dict[str, Any]] = field(default_factory=list)
+    commentary: list["CommentaryEntry"] = field(default_factory=list)
     source: str = "espn"
 
     @property
@@ -128,6 +130,13 @@ class Player:
     citizenship: str = ""
     headshot: str = ""
     stats: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class CommentaryEntry:
+    sequence: int
+    minute: str
+    text: str
 
 
 @dataclass
@@ -302,6 +311,28 @@ class DataProvider:
             return self._parse_roster(data), None
         except Exception as exc:
             return [], f"球员名单暂时不可用: {exc}"
+
+    def get_match_commentary(
+        self,
+        match_id: str,
+        live: bool = False,
+        force: bool = False,
+    ) -> tuple[list[CommentaryEntry], dict[str, Any], str | None]:
+        if not match_id:
+            return [], {}, "缺少比赛 ID"
+        # Completed play-by-play is immutable; retain it for fast detail opening.
+        ttl = 8 if live else 365 * 24 * 3600
+        try:
+            data = self.fetch_json(
+                ESPN_SUMMARY_URL.format(match_id=match_id),
+                f"espn_summary_{safe_filename(match_id)}.json",
+                ttl_seconds=ttl,
+                force=force,
+            )
+            commentary = self._parse_espn_commentary(data.get("commentary") or [])
+            return commentary, data, None
+        except Exception as exc:
+            return [], {}, f"文字直播暂时不可用: {exc}"
 
     def fetch_json(self, url: str, cache_name: str, ttl_seconds: int, force: bool = False) -> dict[str, Any]:
         cache_path = self.cache_dir / cache_name
@@ -482,6 +513,28 @@ class DataProvider:
                 }
             )
         return events
+
+    def _parse_espn_commentary(self, rows: list[dict[str, Any]]) -> list[CommentaryEntry]:
+        commentary: list[CommentaryEntry] = []
+        seen: set[int] = set()
+        for index, item in enumerate(rows):
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            try:
+                sequence = int(item.get("sequence", index))
+            except (TypeError, ValueError):
+                sequence = index
+            if sequence in seen:
+                continue
+            seen.add(sequence)
+            time_data = item.get("time") or {}
+            minute = str(time_data.get("displayValue") or "").strip()
+            commentary.append(CommentaryEntry(sequence=sequence, minute=minute, text=text))
+        commentary.sort(key=lambda row: row.sequence)
+        return commentary
 
     def _parse_espn_standings(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         groups: list[dict[str, Any]] = []
