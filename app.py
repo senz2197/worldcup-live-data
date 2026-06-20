@@ -55,7 +55,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -557,6 +557,9 @@ class WorldCupFloatApp:
 
         self.provider = DataProvider()
         self.commentary_service = CommentaryService(self.provider.cache_dir)
+        self.ai_prewarm_running = False
+        self.ai_prewarm_scheduled = False
+        self.ai_prewarm_suppressed = False
         self.root.report_callback_exception = self._log_tk_exception
         self.images = ImageCache(self.root, self.provider.cache_dir / "images", on_loaded=self._schedule_image_refresh)
         self.localizer = NameLocalizer()
@@ -643,6 +646,7 @@ class WorldCupFloatApp:
         self.commentary_lines_var = tk.IntVar(value=self._valid_commentary_lines(self.config.get("commentary_lines"), 3))
         self.agnes_api_key_var = tk.StringVar(value=str(self.secrets.get("agnes_api_key") or ""))
         self.ai_status_var = tk.StringVar(value="Agnes AI 已启用" if self.agnes_api_key_var.get().strip() else "未设置 API Key，将显示原始数据")
+        self.ai_cache_status_var = tk.StringVar(value=self._ai_cache_status_text())
         self.live_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("live_refresh_seconds"), 5))
         self.default_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("default_refresh_seconds"), 15))
         self.update_status_var = tk.StringVar(value=f"当前版本 {APP_VERSION}")
@@ -659,6 +663,7 @@ class WorldCupFloatApp:
         self.root.after(50, self._mark_as_tool_window)
         self.refresh_data(force=False, quiet=False)
         self.root.after(self._current_refresh_ms(), self._auto_refresh)
+        self.root.after(60 * 60 * 1000, self._maintain_ai_cache)
 
     def run(self) -> None:
         self.root.mainloop()
@@ -1069,6 +1074,132 @@ class WorldCupFloatApp:
             self._post_ui(lambda text=status: self.ai_status_var.set(text))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _ai_cache_status_text(self, prefix: str = "") -> str:
+        info = self.commentary_service.cache_info()
+        size = info["bytes"]
+        if size >= 1024 * 1024:
+            size_text = f"{size / (1024 * 1024):.1f} MB"
+        elif size >= 1024:
+            size_text = f"{size / 1024:.0f} KB"
+        else:
+            size_text = f"{size} B"
+        detail = f"已缓存 {info['matches']} 场 · {size_text} · 自动保留 7 天"
+        return f"{prefix}{detail}" if prefix else detail
+
+    def _refresh_ai_cache_status(self, prefix: str = "") -> None:
+        self.ai_cache_status_var.set(self._ai_cache_status_text(prefix))
+
+    def _clear_ai_cache(self) -> None:
+        self.ai_prewarm_suppressed = True
+        self.commentary_service.clear_cache()
+        self.commentary_texts.clear()
+        self.detail_commentary_snapshots.clear()
+        self.detail_commentary_errors.clear()
+        self.summary_texts.clear()
+        self.summary_errors.clear()
+        self._refresh_ai_cache_status("已清除 · ")
+        self._update_all_commentary_labels()
+        if self.snapshot:
+            self._refresh_live_commentary(self.snapshot, force=False)
+        if self.match_popup is not None and self.match_popup.winfo_exists():
+            self._close_match_popup()
+
+    def _maintain_ai_cache(self) -> None:
+        removed = self.commentary_service.prune_expired_cache()
+        self._refresh_ai_cache_status(f"已自动清理 {removed} 场 · " if removed else "")
+        try:
+            self.root.after(60 * 60 * 1000, self._maintain_ai_cache)
+        except tk.TclError:
+            pass
+
+    def _schedule_recent_ai_prewarm(self, snapshot: Snapshot) -> None:
+        if (
+            self.ai_prewarm_running
+            or self.ai_prewarm_scheduled
+            or self.ai_prewarm_suppressed
+            or not self.agnes_api_key_var.get().strip()
+            or not self.ai_commentary_var.get()
+            or any(match.is_live for match in snapshot.matches)
+        ):
+            return
+        completed = [match for match in snapshot.matches if match.completed]
+        completed.sort(key=lambda match: match.date or MIN_DATE, reverse=True)
+        candidates = completed[:3]
+        if not candidates:
+            return
+        self.ai_prewarm_scheduled = True
+
+        def start() -> None:
+            self.ai_prewarm_scheduled = False
+            if self.ai_prewarm_suppressed or self.ai_prewarm_running:
+                return
+            self.ai_prewarm_running = True
+            generation = self.commentary_service.cache_generation
+            api_key = self.agnes_api_key_var.get().strip()
+
+            def worker() -> None:
+                rendered = 0
+                try:
+                    for match in candidates:
+                        if (
+                            generation != self.commentary_service.cache_generation
+                            or self.ai_prewarm_suppressed
+                            or self.detail_commentary_loading
+                            or self.summary_loading
+                        ):
+                            break
+                        entries, _detail, error = self.provider.get_match_commentary(
+                            match.id,
+                            live=False,
+                            force=False,
+                        )
+                        if error or not entries:
+                            continue
+                        timeline_ready = self.commentary_service.has_complete_timeline(
+                            match.id,
+                            entries,
+                        )
+                        summary_ready = bool(
+                            self.commentary_service.summary(
+                                match.id,
+                                self.commentary_service.summary_signature(match, entries),
+                            )
+                        )
+                        if timeline_ready and summary_ready:
+                            continue
+                        if not timeline_ready:
+                            self.commentary_service.translate_complete_timeline(
+                                match,
+                                entries,
+                                api_key,
+                            )
+                        if generation != self.commentary_service.cache_generation:
+                            break
+                        if not summary_ready:
+                            self.commentary_service.summarize_match(
+                                match,
+                                entries,
+                                api_key,
+                            )
+                        rendered += 1
+                        self._post_ui(
+                            lambda count=rendered:
+                            self._refresh_ai_cache_status(f"后台已预渲染 {count} 场 · ")
+                        )
+                except Exception as exc:
+                    message = self._friendly_commentary_error(exc)
+                    self._post_ui(lambda text=message: self.ai_cache_status_var.set(text))
+                finally:
+                    self._post_ui(self._finish_ai_prewarm)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        self.root.after(15000, start)
+
+    def _finish_ai_prewarm(self) -> None:
+        self.ai_prewarm_running = False
+        self._refresh_ai_cache_status()
 
     def _version_tuple(self, value: str) -> tuple[int, ...]:
         parts = []
@@ -2162,6 +2293,22 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             justify="left",
             font=("Microsoft YaHei UI", 8),
         ).pack(fill="x", pady=(6, 0))
+
+        tk.Label(body, text="AI 缓存", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+        cache_panel = tk.Frame(body, bg=PANEL_2, padx=9, pady=8, highlightthickness=1, highlightbackground=LINE)
+        cache_panel.pack(fill="x", pady=(3, 10))
+        cache_status = tk.Label(
+            cache_panel,
+            textvariable=self.ai_cache_status_var,
+            bg=PANEL_2,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            font=("Microsoft YaHei UI", 8),
+        )
+        cache_status.pack(side="left", fill="x", expand=True)
+        self._bind_wrap(cache_status, reserve=104, minimum=130, maximum=240)
+        self._text_button(cache_panel, "清除缓存", self._clear_ai_cache).pack(side="right", padx=(8, 0))
         tk.Checkbutton(
             body,
             text="保持置顶",
@@ -2328,6 +2475,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._maybe_show_match_notification(snapshot)
         self.images.prefetch(self._all_logo_urls(snapshot))
         self._refresh_live_commentary(snapshot)
+        self._schedule_recent_ai_prewarm(snapshot)
         current_live_ids = {match.id for match in snapshot.matches if match.is_live}
         ended_ids = previous_live_ids - current_live_ids
         for match in snapshot.matches:
@@ -2728,7 +2876,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                         api_key,
                     )
                 except Exception as exc:
-                    error = str(exc)
+                    error = self._friendly_commentary_error(exc)
+                    translations = {
+                        entry.sequence: entry.text
+                        for entry in entries
+                    }
             self._post_ui(
                 lambda current=match, rows=entries, texts=translations, detail_error=error, summarize=request_summary:
                 self._apply_complete_detail_commentary(
@@ -2760,7 +2912,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             }
             self.detail_commentary_snapshots[match.id] = (ordered_entries, complete_texts)
             self.commentary_entries[match.id] = ordered_entries
-            self.detail_commentary_errors.pop(match.id, None)
+            if error:
+                self.detail_commentary_errors[match.id] = error
+            else:
+                self.detail_commentary_errors.pop(match.id, None)
         elif error:
             self.detail_commentary_errors[match.id] = error
         else:
@@ -2818,6 +2973,22 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             if not self.commentary_errors.get(match_id):
                 return ""
         return entry.text
+
+    @staticmethod
+    def _friendly_commentary_error(error: Exception | str) -> str:
+        text = str(error or "").strip()
+        lowered = text.lower()
+        if "timed out" in lowered or "timeout" in lowered or "超时" in text:
+            return "AI 中文润色请求超时，已显示原始文字直播；稍后重新打开可自动重试。"
+        if "401" in text or "unauthorized" in lowered:
+            return "AI API Key 无效，已显示原始文字直播；请在设置中重新填写。"
+        if "403" in text or "forbidden" in lowered:
+            return "AI 接口拒绝访问，已显示原始文字直播；请检查 API 权限。"
+        if "name or service not known" in lowered or "getaddrinfo" in lowered:
+            return "当前无法解析 AI 服务地址，已显示原始文字直播；请检查网络连接。"
+        if "connection" in lowered or "network" in lowered or "urlopen" in lowered:
+            return "AI 服务连接暂时中断，已显示原始文字直播；稍后重新打开可自动重试。"
+        return f"AI 中文润色暂时不可用，已显示原始文字直播：{text or '未知错误'}"
 
     def _commentary_ai_mode(self) -> bool:
         return bool(self.ai_commentary_var.get() or self.ai_translate_raw_var.get())
@@ -3625,9 +3796,32 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 text = f"完整中文文字直播暂时不可用：{self.detail_commentary_errors[match.id]}"
             else:
                 text = "正在准备完整中文文字直播…"
-            tk.Label(panel, text=text, bg=PANEL, fg=MUTED, anchor="w", justify="left").pack(fill="x", pady=5)
+            error_label = tk.Label(
+                panel,
+                text=text,
+                bg=PANEL,
+                fg=MUTED,
+                anchor="w",
+                justify="left",
+            )
+            error_label.pack(fill="x", pady=5)
+            self._bind_wrap(error_label, reserve=4, minimum=120, maximum=306)
             return
         visible_entries, translated = snapshot
+        notice = self.detail_commentary_errors.get(match.id)
+        if notice:
+            notice_label = tk.Label(
+                panel,
+                text=notice,
+                bg=PANEL_2,
+                fg=WARNING,
+                anchor="w",
+                justify="left",
+                padx=7,
+                pady=6,
+            )
+            notice_label.pack(fill="x", pady=(0, 5))
+            self._bind_wrap(notice_label, reserve=18, minimum=110, maximum=292)
         timeline_font = tkfont.Font(
             root=self.root,
             family=self.ui_font_var.get() or "Microsoft YaHei UI",
