@@ -9,3 +9,4 @@ winrt-Windows.Media.Playback>=3.2.1
 winrt-Windows.Media.SpeechSynthesis>=3.2.1
 winrt-Windows.Storage.Streams>=3.2.1
 opencc-python-reimplemented>=0.1.7
+edge-tts>=7.2.0

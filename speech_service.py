@@ -3,7 +3,11 @@ from __future__ import annotations
 import queue
 import threading
 import asyncio
+import ctypes
+import tempfile
+import uuid
 from dataclasses import dataclass
+from pathlib import Path
 
 
 try:
@@ -12,11 +16,26 @@ except Exception:
     pyttsx3 = None
 
 try:
+    import edge_tts
+except Exception:
+    edge_tts = None
+
+try:
     from winrt.windows.media.playback import MediaPlayer
     from winrt.windows.media.speechsynthesis import SpeechSynthesizer
 except Exception:
     MediaPlayer = None
     SpeechSynthesizer = None
+
+
+EDGE_VOICES = (
+    ("zh-CN-YunjianNeural", "云健 · 体育激情（在线神经语音）"),
+    ("zh-CN-XiaoxiaoNeural", "晓晓 · 温暖自然（在线神经语音）"),
+    ("zh-CN-YunyangNeural", "云扬 · 专业新闻（在线神经语音）"),
+    ("zh-CN-YunxiNeural", "云希 · 阳光活力（在线神经语音）"),
+    ("zh-CN-XiaoyiNeural", "晓伊 · 活泼明快（在线神经语音）"),
+)
+DEFAULT_EDGE_VOICE_ID = f"edge:{EDGE_VOICES[0][0]}"
 
 
 @dataclass(frozen=True)
@@ -31,26 +50,32 @@ class SpeechService:
         self._thread: threading.Thread | None = None
 
     def voices(self) -> list[SpeechVoice]:
+        voices = [
+            SpeechVoice(f"edge:{voice_id}", name)
+            for voice_id, name in EDGE_VOICES
+        ] if edge_tts is not None else []
         if SpeechSynthesizer is not None:
             try:
-                return [
+                voices.extend(
                     SpeechVoice(str(voice.id), f"{voice.display_name} · 本地自然语音")
                     for voice in SpeechSynthesizer.all_voices
                     if str(voice.language).lower().startswith("zh")
-                ]
+                )
+                return voices
             except Exception:
                 pass
         if pyttsx3 is None:
-            return []
+            return voices
         engine = None
         try:
             engine = pyttsx3.init()
-            return [
+            voices.extend(
                 SpeechVoice(str(voice.id), str(voice.name))
                 for voice in engine.getProperty("voices")
-            ]
+            )
+            return voices
         except Exception:
-            return []
+            return voices
         finally:
             if engine is not None:
                 try:
@@ -60,7 +85,11 @@ class SpeechService:
 
     def speak(self, text: str, voice_id: str = "", rate: int = 185) -> None:
         text = " ".join(str(text or "").split())
-        if not text or pyttsx3 is None:
+        if not text or (
+            edge_tts is None
+            and SpeechSynthesizer is None
+            and pyttsx3 is None
+        ):
             return
         while self._queue.full():
             try:
@@ -80,38 +109,6 @@ class SpeechService:
                 break
 
     def _worker(self) -> None:
-        if SpeechSynthesizer is not None:
-            try:
-                self._worker_onecore()
-                return
-            except Exception:
-                pass
-        engine = None
-        try:
-            engine = pyttsx3.init()
-            while True:
-                try:
-                    item = self._queue.get(timeout=15)
-                except queue.Empty:
-                    break
-                if item is None:
-                    break
-                text, voice_id, rate = item
-                engine.setProperty("rate", rate)
-                if voice_id:
-                    engine.setProperty("voice", voice_id)
-                engine.say(text)
-                engine.runAndWait()
-        except Exception:
-            pass
-        finally:
-            if engine is not None:
-                try:
-                    engine.stop()
-                except Exception:
-                    pass
-
-    def _worker_onecore(self) -> None:
         while True:
             try:
                 item = self._queue.get(timeout=15)
@@ -120,7 +117,93 @@ class SpeechService:
             if item is None:
                 break
             text, voice_id, rate = item
-            asyncio.run(self._speak_onecore(text, voice_id, rate))
+            if voice_id.startswith("edge:") and edge_tts is not None:
+                try:
+                    asyncio.run(self._speak_edge(text, voice_id, rate))
+                    continue
+                except Exception:
+                    pass
+            if SpeechSynthesizer is not None:
+                local_voice_id = "" if voice_id.startswith("edge:") else voice_id
+                try:
+                    asyncio.run(self._speak_onecore(text, local_voice_id, rate))
+                    continue
+                except Exception:
+                    pass
+            if pyttsx3 is not None:
+                self._speak_sapi(
+                    text,
+                    "" if voice_id.startswith("edge:") else voice_id,
+                    rate,
+                )
+
+    async def _speak_edge(self, text: str, voice_id: str, rate: int) -> None:
+        voice = voice_id.removeprefix("edge:") or EDGE_VOICES[0][0]
+        rate_percent = max(-35, min(40, round((rate / 185 - 1) * 100)))
+        rate_value = f"{rate_percent:+d}%"
+        handle = tempfile.NamedTemporaryFile(
+            prefix="worldcup_tts_",
+            suffix=".mp3",
+            delete=False,
+        )
+        audio_path = Path(handle.name)
+        handle.close()
+        try:
+            communicate = edge_tts.Communicate(
+                text,
+                voice,
+                rate=rate_value,
+                connect_timeout=6,
+                receive_timeout=20,
+            )
+            await communicate.save(str(audio_path))
+            self._play_mp3(audio_path)
+        finally:
+            try:
+                audio_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _play_mp3(audio_path: Path) -> None:
+        alias = f"worldcup_{uuid.uuid4().hex}"
+        winmm = ctypes.windll.winmm
+
+        def command(value: str) -> None:
+            result = ctypes.create_unicode_buffer(256)
+            code = winmm.mciSendStringW(value, result, len(result), 0)
+            if code:
+                message = ctypes.create_unicode_buffer(256)
+                winmm.mciGetErrorStringW(code, message, len(message))
+                raise RuntimeError(message.value or f"MCI error {code}")
+
+        try:
+            command(f'open "{audio_path}" type mpegvideo alias {alias}')
+            command(f"play {alias} wait")
+        finally:
+            try:
+                command(f"close {alias}")
+            except Exception:
+                pass
+
+    @staticmethod
+    def _speak_sapi(text: str, voice_id: str, rate: int) -> None:
+        engine = None
+        try:
+            engine = pyttsx3.init()
+            engine.setProperty("rate", rate)
+            if voice_id:
+                engine.setProperty("voice", voice_id)
+            engine.say(text)
+            engine.runAndWait()
+        except Exception:
+            pass
+        finally:
+            if engine is not None:
+                try:
+                    engine.stop()
+                except Exception:
+                    pass
 
     async def _speak_onecore(self, text: str, voice_id: str, rate: int) -> None:
         synthesizer = SpeechSynthesizer()

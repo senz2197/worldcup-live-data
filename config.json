@@ -36,7 +36,7 @@
   "free_translate": true,
   "commentary_lines": 3,
   "tts_enabled": false,
-  "tts_voice": "",
+  "tts_voice": "edge:zh-CN-YunjianNeural",
   "tts_rate": 185,
   "topmost": true,
   "use_english": false,

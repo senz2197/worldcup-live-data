@@ -41,8 +41,9 @@ WorldCupFloat_Portable.zip
 - One-click GitHub update that preserves the current local configuration
 - ESPN play-by-play commentary shown directly below each live score card
 - Chinese AI commentary with raw-data and translation modes
-- Optional offline Windows text-to-speech for live Chinese commentary, using installed system voices
-- Windows OneCore natural local voices are preferred, with legacy SAPI as fallback
+- Microsoft Edge online neural voices for more natural live Chinese commentary
+- Sports-focused Yunjian is the default voice, with Xiaoxiao, Yunyang, Yunxi, and Xiaoyi available in settings
+- Windows OneCore and legacy SAPI voices remain automatic offline fallbacks
 - Live commentary is polled independently every two seconds and shows new source events immediately while translation is pending
 - League news tab with one-to-twelve-week filtering, favorite-team priority, translated summaries, and original-source links
 - Free machine translation fallback for commentary and news when AI is disabled or unavailable

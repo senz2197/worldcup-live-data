@@ -28,7 +28,7 @@ from data_provider import COMPETITIONS, CommentaryEntry, DataProvider, LeaderRow
 from localization import NameLocalizer
 from news_service import FreeTranslationService, NewsItem, NewsService
 from name_service import WikidataNameService
-from speech_service import SpeechService
+from speech_service import DEFAULT_EDGE_VOICE_ID, SpeechService
 
 
 try:
@@ -61,7 +61,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -800,7 +800,7 @@ class WorldCupFloatApp:
             self.ai_translate_raw_var.set(False)
         self.commentary_lines_var = tk.IntVar(value=self._valid_commentary_lines(self.config.get("commentary_lines"), 3))
         self.tts_enabled_var = tk.BooleanVar(value=bool(self.config.get("tts_enabled", False)))
-        self.tts_voice_var = tk.StringVar(value=str(self.config.get("tts_voice") or ""))
+        self.tts_voice_var = tk.StringVar(value=str(self.config.get("tts_voice") or DEFAULT_EDGE_VOICE_ID))
         self.tts_rate_var = tk.IntVar(value=int(self.config.get("tts_rate") or 185))
         self.speech_voices = self.speech_service.voices()
         self.spoken_commentary_sequences: dict[str, int] = {}
@@ -1335,6 +1335,13 @@ class WorldCupFloatApp:
         if not self.tts_enabled_var.get():
             self.speech_service.stop()
         self._save_config()
+
+    def _preview_tts_voice(self) -> None:
+        self.speech_service.speak(
+            "禁区前沿突然起脚，皮球直挂死角，漂亮的进球！",
+            self.tts_voice_var.get(),
+            self.tts_rate_var.get(),
+        )
 
     def _save_commentary_settings(self, *_args) -> None:
         self.commentary_lines_var.set(self._valid_commentary_lines(self.commentary_lines_var.get(), 3))
@@ -3063,21 +3070,28 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             activebackground=PANEL_2,
             activeforeground=TEXT,
         ).pack(anchor="w")
-        voice_names = ["系统默认"] + [voice.name for voice in self.speech_voices]
-        voice_ids = {"系统默认": "", **{voice.name: voice.id for voice in self.speech_voices}}
+        voice_names = ["系统默认（本地）"] + [voice.name for voice in self.speech_voices]
+        voice_ids = {"系统默认（本地）": "", **{voice.name: voice.id for voice in self.speech_voices}}
         selected_voice_name = next(
             (voice.name for voice in self.speech_voices if voice.id == self.tts_voice_var.get()),
-            "系统默认",
+            "系统默认（本地）",
         )
         voice_name_var = tk.StringVar(value=selected_voice_name)
+        voice_row = tk.Frame(commentary_panel, bg=PANEL_2)
+        voice_row.pack(fill="x", pady=(5, 0))
         voice_combo = ttk.Combobox(
-            commentary_panel,
+            voice_row,
             textvariable=voice_name_var,
             values=voice_names,
             state="readonly",
             style="WorldCup.TCombobox",
         )
-        voice_combo.pack(fill="x", pady=(5, 0))
+        voice_combo.pack(side="left", fill="x", expand=True)
+        self._text_button(
+            voice_row,
+            "试听",
+            self._preview_tts_voice,
+        ).pack(side="left", padx=(7, 0))
         voice_combo.bind(
             "<<ComboboxSelected>>",
             lambda _event: (
