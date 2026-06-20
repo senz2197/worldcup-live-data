@@ -61,7 +61,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -709,7 +709,7 @@ class WorldCupFloatApp:
         self.roster_loaded_at: dict[str, float] = {}
         self.roster_errors: dict[str, str | None] = {}
         self.loading_rosters: set[str] = set()
-        self.match_labels: dict[str, list[dict[str, tk.Label]]] = {}
+        self.match_labels: dict[str, list[dict[str, object]]] = {}
         self.commentary_entries: dict[str, list[CommentaryEntry]] = {}
         self.commentary_texts: dict[str, dict[int, str]] = {}
         self.commentary_errors: dict[str, str] = {}
@@ -861,7 +861,7 @@ class WorldCupFloatApp:
         if not CONFIG_PATH.exists():
             return {}
         try:
-            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
@@ -870,7 +870,7 @@ class WorldCupFloatApp:
         if not SECRETS_PATH.exists():
             return {}
         try:
-            data = json.loads(SECRETS_PATH.read_text(encoding="utf-8"))
+            data = json.loads(SECRETS_PATH.read_text(encoding="utf-8-sig"))
             return data if isinstance(data, dict) else {}
         except Exception:
             return {}
@@ -1086,6 +1086,19 @@ class WorldCupFloatApp:
         ):
             if popup is not None and popup.winfo_exists():
                 self._apply_fonts_to_tree(popup)
+        for label_sets in self.match_labels.values():
+            for labels in label_sets:
+                header = labels.get("_header")
+                align_header = getattr(
+                    header,
+                    "_worldcup_align_header",
+                    None,
+                )
+                if callable(align_header):
+                    try:
+                        header.after_idle(align_header)
+                    except tk.TclError:
+                        pass
         self._save_config()
 
     def _valid_palette_name(self, value: str | None) -> str:
@@ -3462,7 +3475,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     value = row.display_value.replace("Matches:", "赛").replace("Goals:", "球").replace("Assists:", "助攻")
                     self._safe_label_config(label, text=value)
 
-    def _apply_match_labels(self, labels: dict[str, tk.Label], match: Match) -> None:
+    def _apply_match_labels(self, labels: dict[str, object], match: Match) -> None:
         status_color = LIVE if match.is_live else (ACCENT if match.completed else WARNING)
         status = "LIVE " + match.status_text if match.is_live else (match.status_text or ("完赛" if match.completed else "未开始"))
         when = match.date.strftime("%m-%d %H:%M") if match.date else "时间待定"
@@ -3484,11 +3497,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         }
         for key, value in updates.items():
             label = labels.get(key)
-            if label is not None:
+            if isinstance(label, tk.Label):
                 kwargs = {"text": value}
                 if key == "status":
                     kwargs["fg"] = status_color
                 self._safe_label_config(label, **kwargs)
+        header = labels.get("_header")
+        align_header = getattr(header, "_worldcup_align_header", None)
+        if callable(align_header):
+            try:
+                header.after_idle(align_header)
+            except tk.TclError:
+                pass
 
     def _safe_label_config(self, label: tk.Label, **kwargs) -> None:
         try:
@@ -3663,7 +3683,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 live=match.is_live,
                 force=force,
             )
-            mode = "narration_v2" if use_ai else "translations"
+            mode = "narration_v3" if use_ai else "translations"
             translations = self.commentary_service.event_texts(match.id, mode=mode)
             ai_error = ""
             ai_requested = bool(entries and api_key and (use_ai or translate_raw))
@@ -3762,7 +3782,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self._request_match_summary(latest_match)
         elif should_summarize:
             self.summary_requested.add(match.id)
-        mode = "narration_v2" if self.ai_commentary_var.get() else "translations"
+        mode = "narration_v3" if self.ai_commentary_var.get() else "translations"
         detail_open = match.id in self.detail_commentary_panels
         ai_enabled = self.ai_commentary_var.get() or self.ai_translate_raw_var.get()
         if (
@@ -4489,6 +4509,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             return
         favorite = self.favorite_teams.get(key, "")
         for item in items:
+            if not self._contains_chinese(item.translated_title):
+                continue
             glossary = self._news_glossary(item)
             item.translated_title = self._enforce_glossary(item.translated_title, glossary)
             item.translated_summary = self._enforce_glossary(item.translated_summary, glossary)
@@ -4508,7 +4530,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             tk.Label(card, text=meta, bg=PANEL, fg=ACCENT, anchor="w", font=("Microsoft YaHei UI", 8, "bold")).pack(fill="x")
             title = tk.Label(
                 card,
-                text=item.translated_title or item.title,
+                text=item.translated_title,
                 bg=PANEL,
                 fg=TEXT,
                 anchor="w",
@@ -4528,7 +4550,6 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         favorite = self.favorite_teams.get(key, "")
         weeks = self.news_weeks_var.get()
         api_key = self.agnes_api_key_var.get().strip()
-        free_translate = self.free_translate_var.get()
         espn_league = str(COMPETITIONS[key]["espn"])
 
         def worker() -> None:
@@ -4538,17 +4559,31 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 favorite_team_id=favorite,
                 force=force,
             )
-            self._post_ui(lambda current=items: self._apply_news(key, current, translating=True))
             pending: list[NewsItem] = []
             for item in items:
-                item.translated_title, item.translated_summary = self.news_service.cached_translation(item.id)
+                item.translated_title, item.translated_summary = (
+                    self.news_service.cached_translation(
+                        item.id,
+                        require_ai=bool(api_key),
+                    )
+                )
                 if item.translated_title:
                     item_glossary = self._news_glossary(item)
                     item.translated_title = self._enforce_glossary(item.translated_title, item_glossary)
                     item.translated_summary = self._enforce_glossary(item.translated_summary, item_glossary)
-                    self.news_service.store_translation(item.id, item.translated_title, item.translated_summary)
-                if not item.translated_title:
+                if not self._contains_chinese(item.translated_title):
+                    item.translated_title = ""
+                    item.translated_summary = ""
                     pending.append(item)
+            ready = [
+                item for item in items
+                if self._contains_chinese(item.translated_title)
+            ]
+            if ready:
+                self._post_ui(
+                    lambda current=list(ready):
+                    self._apply_news(key, current, translating=True)
+                )
             glossary: dict[str, str] = {}
             for item in pending:
                 glossary.update(self._news_glossary(item))
@@ -4567,37 +4602,73 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                         item.translated_title, item.translated_summary = translated.get(
                             item.id, ("", "")
                         )
-                unresolved = [item for item in pending if not item.translated_title]
-                if free_translate and unresolved:
-                    texts = [text for item in unresolved for text in (item.title, item.summary)]
-                    try:
-                        translated_rows = self.free_translation_service.translate_many(texts, glossary)
-                    except Exception:
-                        translated_rows = texts
-                    for index, item in enumerate(unresolved):
-                        item.translated_title = translated_rows[index * 2] if index * 2 < len(translated_rows) else item.title
-                        item.translated_summary = translated_rows[index * 2 + 1] if index * 2 + 1 < len(translated_rows) else item.summary
-            elif free_translate and pending:
-                texts = [text for item in pending for text in (item.title, item.summary)]
+            unresolved = [
+                item for item in pending
+                if not self._contains_chinese(item.translated_title)
+            ]
+            if unresolved:
+                texts = [
+                    text
+                    for item in unresolved
+                    for text in (item.title, item.summary)
+                ]
                 try:
-                    translated_rows = self.free_translation_service.translate_many(texts, glossary)
+                    translated_rows = self.free_translation_service.translate_many(
+                        texts,
+                        glossary,
+                    )
                 except Exception:
-                    translated_rows = texts
-                for index, item in enumerate(pending):
-                    item.translated_title = translated_rows[index * 2] if index * 2 < len(translated_rows) else item.title
-                    item.translated_summary = translated_rows[index * 2 + 1] if index * 2 + 1 < len(translated_rows) else item.summary
+                    translated_rows = []
+                for index, item in enumerate(unresolved):
+                    item.translated_title = (
+                        translated_rows[index * 2]
+                        if index * 2 < len(translated_rows)
+                        else ""
+                    )
+                    item.translated_summary = (
+                        translated_rows[index * 2 + 1]
+                        if index * 2 + 1 < len(translated_rows)
+                        else ""
+                    )
             for item in pending:
+                provider = (
+                    "ai"
+                    if api_key and item not in unresolved
+                    else "free"
+                )
                 item_glossary = self._news_glossary(item)
-                item.translated_title = self._enforce_glossary(item.translated_title, item_glossary)
-                item.translated_summary = self._enforce_glossary(item.translated_summary, item_glossary)
-                if item.translated_title:
-                    self.news_service.store_translation(item.id, item.translated_title, item.translated_summary)
+                item.translated_title = self._enforce_glossary(
+                    item.translated_title,
+                    item_glossary,
+                )
+                item.translated_summary = self._enforce_glossary(
+                    item.translated_summary,
+                    item_glossary,
+                )
+                valid_title = self._contains_chinese(item.translated_title)
+                valid_summary = self._contains_chinese(item.translated_summary)
+                if valid_title:
+                    if not valid_summary:
+                        item.translated_summary = "该资讯暂未提供可用的中文摘要。"
+                    self.news_service.store_translation(
+                        item.id,
+                        item.translated_title,
+                        item.translated_summary,
+                        provider=provider,
+                    )
+                else:
+                    item.translated_title = "资讯中文化暂时不可用"
+                    item.translated_summary = "暂时无法生成中文内容，请稍后刷新。"
             self._post_ui(lambda current=items: self._apply_news(key, current, translating=False))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _news_glossary(self, item: NewsItem) -> dict[str, str]:
-        text = f"{item.title} {item.summary}".casefold()
+    def _news_glossary(
+        self,
+        item: NewsItem,
+        extra_text: str = "",
+    ) -> dict[str, str]:
+        text = f"{item.title} {item.summary} {extra_text}".casefold()
         mappings = {
             **self.localizer.teams_by_name,
             **self.localizer.players,
@@ -4614,6 +4685,59 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         for source, target in sorted(glossary.items(), key=lambda item: len(item[0]), reverse=True):
             result = re.sub(re.escape(source), target, result, flags=re.IGNORECASE)
         return result
+
+    @staticmethod
+    def _contains_chinese(text: str) -> bool:
+        return bool(re.search(r"[\u3400-\u9fff]", str(text or "")))
+
+    @staticmethod
+    def _news_translation_chunks(text: str, limit: int = 330) -> list[str]:
+        paragraphs = [
+            re.sub(r"\s+", " ", paragraph).strip()
+            for paragraph in re.split(r"\n+", str(text or ""))
+            if paragraph.strip()
+        ]
+        chunks: list[str] = []
+        for paragraph in paragraphs:
+            remaining = paragraph
+            while len(remaining) > limit:
+                split_at = max(
+                    remaining.rfind(". ", 0, limit),
+                    remaining.rfind("? ", 0, limit),
+                    remaining.rfind("! ", 0, limit),
+                    remaining.rfind("; ", 0, limit),
+                )
+                if split_at < limit // 2:
+                    split_at = limit
+                else:
+                    split_at += 1
+                chunks.append(remaining[:split_at].strip())
+                remaining = remaining[split_at:].strip()
+            if remaining:
+                chunks.append(remaining)
+        return chunks
+
+    def _translate_news_content_free(
+        self,
+        text: str,
+        glossary: dict[str, str],
+    ) -> str:
+        chunks = self._news_translation_chunks(text)
+        if not chunks:
+            return ""
+        try:
+            translated = self.free_translation_service.translate_many(
+                chunks,
+                glossary,
+            )
+        except Exception:
+            return ""
+        rows = [
+            self._enforce_glossary(row, glossary)
+            for row in translated
+            if self._contains_chinese(row)
+        ]
+        return "\n\n".join(rows)
 
     def _apply_news(self, key: str, items: list[NewsItem], translating: bool) -> None:
         self.news_items[key] = items
@@ -4651,15 +4775,101 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._bind_drag(header)
         body = ScrollFrame(popup, bg=PANEL)
         body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-        headline = tk.Label(body.body, text=item.translated_title or item.title, bg=PANEL, fg=TEXT, anchor="w", justify="left", font=("Microsoft YaHei UI", 13, "bold"))
+        headline = tk.Label(body.body, text=item.translated_title, bg=PANEL, fg=TEXT, anchor="w", justify="left", font=("Microsoft YaHei UI", 13, "bold"))
         headline.pack(fill="x")
         self._bind_wrap(headline, reserve=8, minimum=150, maximum=320)
         tk.Label(body.body, text=f"{item.published.strftime('%Y-%m-%d %H:%M')} · {item.source}", bg=PANEL, fg=MUTED, anchor="w", font=("Microsoft YaHei UI", 8)).pack(fill="x", pady=(6, 12))
-        summary = tk.Label(body.body, text=item.translated_summary or item.summary or "该资讯暂无摘要，请打开原文查看。", bg=PANEL_2, fg=TEXT, padx=10, pady=10, anchor="nw", justify="left", font=("Microsoft YaHei UI", 9))
-        summary.pack(fill="x")
-        self._bind_wrap(summary, reserve=26, minimum=130, maximum=300)
+        content = tk.Label(
+            body.body,
+            text="正在整理完整中文资讯…",
+            bg=PANEL_2,
+            fg=TEXT,
+            padx=10,
+            pady=10,
+            anchor="nw",
+            justify="left",
+            font=("Microsoft YaHei UI", 9),
+        )
+        content.pack(fill="x")
+        self._bind_wrap(content, reserve=26, minimum=130, maximum=300)
         self._text_button(body.body, "打开原文", lambda: webbrowser.open(item.url)).pack(anchor="w", pady=(12, 0))
         self._apply_fonts_to_tree(popup)
+        api_key = self.agnes_api_key_var.get().strip()
+        cached_content = self.news_service.cached_content(
+            item.id,
+            require_ai=bool(api_key),
+        )
+        if self._contains_chinese(cached_content):
+            item.translated_content = cached_content
+            content.configure(text=cached_content)
+            return
+
+        def worker() -> None:
+            raw_text = self.news_service.fetch_full_text(item)
+            glossary = self._news_glossary(item, raw_text)
+            translated_title = item.translated_title
+            translated_content = ""
+            provider = ""
+            if api_key and raw_text:
+                try:
+                    ai_title, ai_content = (
+                        self.commentary_service.rewrite_news_article(
+                            item.title,
+                            item.summary,
+                            raw_text,
+                            glossary,
+                            api_key,
+                        )
+                    )
+                    if self._contains_chinese(ai_content):
+                        translated_title = (
+                            ai_title
+                            if self._contains_chinese(ai_title)
+                            else translated_title
+                        )
+                        translated_content = ai_content
+                        provider = "ai"
+                except Exception:
+                    pass
+            if not translated_content:
+                translated_content = self._translate_news_content_free(
+                    raw_text or item.summary,
+                    glossary,
+                )
+                if translated_content:
+                    provider = "free"
+            translated_title = self._enforce_glossary(
+                translated_title,
+                glossary,
+            )
+            translated_content = self._enforce_glossary(
+                translated_content,
+                glossary,
+            )
+            if not self._contains_chinese(translated_content):
+                translated_content = (
+                    item.translated_summary
+                    if self._contains_chinese(item.translated_summary)
+                    else "完整中文资讯暂时无法生成，请稍后重试。"
+                )
+            elif provider:
+                self.news_service.store_content(
+                    item.id,
+                    translated_content,
+                    provider=provider,
+                )
+
+            def apply() -> None:
+                if self.news_popup is not popup or not popup.winfo_exists():
+                    return
+                item.translated_title = translated_title
+                item.translated_content = translated_content
+                headline.configure(text=translated_title)
+                content.configure(text=translated_content)
+
+            self._post_ui(apply)
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _select_data_board(self, key: str) -> None:
         self.active_data_board_key = key
@@ -5091,26 +5301,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 font_family = font_actual.get("family", self.ui_font_var.get())
                 font_weight = font_actual.get("weight", "bold")
                 font_slant = font_actual.get("slant", "roman")
-                normal_font = tkfont.Font(
-                    root=self.root,
-                    family=font_family,
-                    size=9,
-                    weight=font_weight,
-                    slant=font_slant,
-                )
-                status_width = normal_font.measure(status_label.cget("text")) + 4
-                round_width = normal_font.measure(round_label.cget("text")) + 4
-                centered_available = max(1, team_width - 8)
-                left_edge = round_width > centered_available
-                right_edge = status_width > centered_available
                 font_size = 9
-                left_available = centered_available
-                right_available = (
-                    header_width - team_width - 8
-                    if right_edge
-                    else centered_available
-                )
-                while font_size > 6:
+                gap = 6
+                while font_size >= 4:
                     probe = tkfont.Font(
                         root=self.root,
                         family=font_family,
@@ -5118,16 +5311,38 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                         weight=font_weight,
                         slant=font_slant,
                     )
-                    round_fits = probe.measure(round_label.cget("text")) <= left_available
-                    status_fits = probe.measure(status_label.cget("text")) <= right_available
-                    if round_fits and status_fits:
+                    round_width = probe.measure(round_label.cget("text")) + 6
+                    status_width = probe.measure(status_label.cget("text")) + 6
+                    centered_available = max(1, team_width - 8)
+                    left_edge = round_width > centered_available
+                    right_edge = status_width > centered_available
+                    left_x = (
+                        0
+                        if left_edge
+                        else max(0, (team_width - round_width) // 2)
+                    )
+                    right_x = (
+                        header_width - status_width
+                        if right_edge
+                        else header_width - team_width
+                        + max(0, (team_width - status_width) // 2)
+                    )
+                    if (
+                        left_x >= 0
+                        and right_x + status_width <= header_width
+                        and left_x + round_width + gap <= right_x
+                    ):
                         break
                     font_size -= 1
+                font_size = max(4, font_size)
                 target = (
                     "edge" if left_edge else "center",
                     "edge" if right_edge else "center",
                     font_size,
-                    team_width,
+                    left_x,
+                    round_width,
+                    right_x,
+                    status_width,
                     header_width,
                 )
                 if getattr(status_label, "_worldcup_alignment", None) == target:
@@ -5142,17 +5357,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     justify="right" if right_edge else "center",
                     anchor="e" if right_edge else "center",
                 )
-                if right_edge:
-                    status_x = team_width
-                    status_area_width = header_width - team_width
-                else:
-                    status_area_width = team_width
-                    status_x = header_width - team_width
-                round_label.place_configure(x=0, width=team_width)
+                round_label.place_configure(
+                    relx=0,
+                    x=left_x,
+                    width=max(1, round_width),
+                    anchor="nw",
+                )
                 status_label.place_configure(
                     relx=0,
-                    x=status_x,
-                    width=max(1, status_area_width),
+                    x=right_x,
+                    width=max(1, status_width),
                     anchor="nw",
                 )
                 team_wraplength = max(68, min(132, team_width - 4))
@@ -5173,6 +5387,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             "away_name": away_labels["name"],
             "home_name": home_labels["name"],
             "scoreline": scoreline_label,
+            "_header": header,
         }
         self.match_labels.setdefault(match.id, []).append(labels)
         self._bind_match_open(card, match)

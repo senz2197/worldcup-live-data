@@ -1,14 +1,57 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import threading
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
+
+
+NEWS_TRANSLATION_VERSION = 2
+
+
+class _ArticleTextParser(HTMLParser):
+    BLOCK_TAGS = {"p", "div", "br", "li", "h1", "h2", "h3", "h4", "blockquote"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self.ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag in {"script", "style", "noscript"}:
+            self.ignored_depth += 1
+        elif not self.ignored_depth and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript"}:
+            self.ignored_depth = max(0, self.ignored_depth - 1)
+        elif not self.ignored_depth and tag in self.BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self.ignored_depth:
+            self.parts.append(data)
+
+    def text(self) -> str:
+        value = unescape("".join(self.parts)).replace("\xa0", " ")
+        lines = [
+            re.sub(r"\s+", " ", line).strip()
+            for line in value.splitlines()
+        ]
+        return "\n\n".join(
+            line
+            for line in lines
+            if line and not line.startswith(("- ", "• "))
+        )
 
 
 @dataclass
@@ -23,6 +66,9 @@ class NewsItem:
     team_ids: list[str] = field(default_factory=list)
     translated_title: str = ""
     translated_summary: str = ""
+    api_url: str = ""
+    full_text: str = ""
+    translated_content: str = ""
 
 
 class FreeTranslationService:
@@ -120,31 +166,114 @@ class NewsService:
     def __init__(self, cache_dir: Path) -> None:
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.translation_path = cache_dir / "news_translation_cache.json"
+        self.translation_path = cache_dir / "news_translation_cache_v2.json"
+        self.article_cache_dir = cache_dir / "news_articles"
+        self.article_cache_dir.mkdir(parents=True, exist_ok=True)
         try:
             self.translations = json.loads(self.translation_path.read_text(encoding="utf-8"))
         except Exception:
             self.translations = {}
         self.translation_lock = threading.Lock()
 
-    def cached_translation(self, item_id: str) -> tuple[str, str]:
+    def cached_translation(
+        self,
+        item_id: str,
+        require_ai: bool = False,
+    ) -> tuple[str, str]:
         with self.translation_lock:
             row = self.translations.get(str(item_id)) or {}
+        if int(row.get("version") or 0) != NEWS_TRANSLATION_VERSION:
+            return "", ""
+        if require_ai and row.get("list_provider") != "ai":
+            return "", ""
         return str(row.get("title") or ""), str(row.get("summary") or "")
 
-    def store_translation(self, item_id: str, title: str, summary: str) -> None:
+    def cached_content(self, item_id: str, require_ai: bool = False) -> str:
+        with self.translation_lock:
+            row = self.translations.get(str(item_id)) or {}
+        if int(row.get("version") or 0) != NEWS_TRANSLATION_VERSION:
+            return ""
+        if require_ai and row.get("content_provider") != "ai":
+            return ""
+        return str(row.get("content") or "")
+
+    def store_translation(
+        self,
+        item_id: str,
+        title: str,
+        summary: str,
+        provider: str,
+    ) -> None:
         if not title:
             return
         with self.translation_lock:
-            self.translations[str(item_id)] = {
+            row = dict(self.translations.get(str(item_id)) or {})
+            row.update({
+                "version": NEWS_TRANSLATION_VERSION,
                 "title": title,
                 "summary": summary,
+                "list_provider": provider,
                 "updated_at": int(time.time()),
-            }
-            self.translation_path.write_text(
-                json.dumps(self.translations, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
+            })
+            self.translations[str(item_id)] = row
+            self._save_translations()
+
+    def store_content(self, item_id: str, content: str, provider: str) -> None:
+        if not content:
+            return
+        with self.translation_lock:
+            row = dict(self.translations.get(str(item_id)) or {})
+            row.update({
+                "version": NEWS_TRANSLATION_VERSION,
+                "content": content,
+                "content_provider": provider,
+                "updated_at": int(time.time()),
+            })
+            self.translations[str(item_id)] = row
+            self._save_translations()
+
+    def _save_translations(self) -> None:
+        self.translation_path.write_text(
+            json.dumps(self.translations, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def fetch_full_text(self, item: NewsItem, force: bool = False) -> str:
+        if item.full_text and not force:
+            return item.full_text
+        safe_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(item.id))
+        cache_path = self.article_cache_dir / f"{safe_id}.json"
+        payload: dict[str, Any] | None = None
+        if not force:
+            payload = self._read_cache(cache_path, 7 * 24 * 60 * 60)
+        if payload is None and item.api_url:
+            request = urllib.request.Request(
+                item.api_url,
+                headers={"User-Agent": "WorldCupFloat/1.5"},
             )
+            try:
+                with urllib.request.urlopen(request, timeout=18) as response:
+                    data = json.loads(response.read().decode("utf-8-sig"))
+                rows = data.get("headlines") or []
+                payload = rows[0] if rows else data
+                cache_path.write_text(
+                    json.dumps(
+                        {"fetched_at": time.time(), "data": payload},
+                        ensure_ascii=False,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception:
+                payload = self._read_cache(cache_path, None) or {}
+        story = str((payload or {}).get("story") or "")
+        if story:
+            parser = _ArticleTextParser()
+            parser.feed(story)
+            text = parser.text()
+        else:
+            text = str((payload or {}).get("description") or item.summary or "")
+        item.full_text = text.strip()
+        return item.full_text
 
     def fetch(
         self,
@@ -185,6 +314,10 @@ class NewsService:
             ]
             links = article.get("links") or {}
             url = str(((links.get("web") or {}).get("href")) or "")
+            api_url = str(
+                (((links.get("api") or {}).get("self") or {}).get("href"))
+                or ""
+            )
             images = article.get("images") or []
             items.append(
                 NewsItem(
@@ -195,6 +328,7 @@ class NewsService:
                     url=url,
                     image=str((images[0] if images else {}).get("url") or ""),
                     team_ids=[team_id for team_id in team_ids if team_id],
+                    api_url=api_url,
                 )
             )
         items.sort(

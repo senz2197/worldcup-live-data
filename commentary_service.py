@@ -108,7 +108,7 @@ class CommentaryService:
         match_id: str,
         entries: list[CommentaryEntry],
     ) -> bool:
-        cached = self.event_texts(match_id, mode="detail_narration_v3")
+        cached = self.event_texts(match_id, mode="detail_narration_v4")
         return bool(entries) and all(entry.sequence in cached for entry in entries)
 
     @staticmethod
@@ -121,7 +121,7 @@ class CommentaryService:
     def _mark_cached(self, match_id: str) -> None:
         self.cache.setdefault(AI_CACHE_META_KEY, {})[match_id] = int(time.time())
 
-    def event_texts(self, match_id: str, mode: str = "narration_v2") -> dict[int, str]:
+    def event_texts(self, match_id: str, mode: str = "narration_v3") -> dict[int, str]:
         rows = (self.cache.get(mode) or {}).get(match_id) or {}
         result: dict[int, str] = {}
         for key, value in rows.items():
@@ -143,7 +143,7 @@ class CommentaryService:
         entries: list[CommentaryEntry],
         api_key: str,
     ) -> dict[int, str]:
-        return self._transform_events(match, entries, api_key, mode="narration_v2")
+        return self._transform_events(match, entries, api_key, mode="narration_v3")
 
     def translate_events(
         self,
@@ -197,7 +197,7 @@ class CommentaryService:
         api_key: str,
     ) -> dict[int, str]:
         generation = self.cache_generation
-        mode = "detail_narration_v3"
+        mode = "detail_narration_v4"
         cached = self.event_texts(match.id, mode=mode)
         missing = [entry for entry in entries if entry.sequence not in cached]
         if missing:
@@ -258,12 +258,24 @@ class CommentaryService:
             minute = str(entry.minute or "").replace("|", "/")
             source_lines.append(f"{entry.sequence}|{minute}|{event}")
         prompt = (
-            "你是专业足球文字直播总编辑。下面提供同一场比赛的完整英文时间线，请通读整场后，"
-            "逐条改写为准确、连贯、有临场感的中文足球解说。必须保留全部事件及原编号，统一"
-            "球员译名和足球术语，并结合前后文消除代词歧义与机械重复。进球、关键扑救、门框、"
-            "VAR、点球和红牌可以增强张力；普通犯规、界外球、换人和伤停保持克制。"
-            "不得虚构观众反应、球员心理、战术意图、动作细节或原文没有的事实。"
-            "不要在中文正文重复分钟。每条尽量在48个汉字以内。"
+            "你是经验丰富的中文足球现场解说员兼文字直播总编辑。下面提供同一场比赛的完整英文"
+            "时间线，请通读整场后逐条写成准确、连贯、富有临场节奏的中文解说。每条都要优先"
+            "写清谁在什么区域完成了什么动作以及结果，使用鲜活有力的动词和长短句变化，避免"
+            "“某某获得某某”“某某进行射门”一类翻译腔。进球可以用“球进了！”引出并点明"
+            "进球队员与方式；关键扑救、门框、VAR、点球和红牌要有明显张力；连续攻势要体现"
+            "节奏推进；普通犯规、界外球、换人和伤停保持专业克制。必须保留全部事件及原编号，"
+            "统一球员译名和足球术语，并结合前后文消除代词歧义与机械重复。"
+            "只能使用原事件明确给出的动作、部位、区域、方向和结果。原文未写传中或助攻，就"
+            "不能补出传中与助攻；只写射门被扑，就不能改成托出横梁、飞出底线或击中门框；"
+            "未给球员位置就不能称其为前锋、中场或后卫。不得虚构观众反应、球员心理、战术"
+            "意图、动作细节或原文没有的事实。方向必须严格等价：top centre 只能写球门上方"
+            "中路，bottom right 只能写右下角，绝不能替换成死角、近角或其他位置。原文未写"
+            "旋转、飞身、跃起、传中、速度或出界方式时禁止添加这些词。情绪只能通过“球进了！”"
+            "“好险！”等短促开场、标点和句式节奏表达，不能依靠虚构动作来制造画面。输出前"
+            "在内部核对每个区域、方向和动作修饰词，任何无法从原文直接找到依据的词都要删除。"
+            "可以表达事件本身自然产生的紧张、遗憾、精彩或振奋感，但不能捏造现场信息。"
+            "中文正文绝对不要出现分钟、时间或其中文数字写法。普通事件尽量在35至55个汉字，"
+            "重大事件可以稍长。"
             "严格每行输出一条，格式只能是“原编号|中文解说”；不得输出标题、说明、Markdown"
             "或遗漏编号。\n"
             f"比赛：{match.home.name} {match.home.score or '0'}-"
@@ -296,10 +308,20 @@ class CommentaryService:
         ]
         if mode.startswith("narration"):
             instruction = (
-                "将每条英文事件改写成短促、准确、有临场感的中文足球实时解说。"
-                "进球、关键扑救、击中门框、VAR判定、点球和红牌可以明显增强语气与节奏；"
-                "射门、角球、危险任意球可保持适度紧张感；普通犯规、界外球、换人和伤停必须克制。"
-                "使用中国大陆常见的专业足球解说术语，句式自然有力，不能机械直译。"
+            "把每条事件写成可以直接由现场解说员播出的中文口播。先准确识别事件强度，再用"
+            "有画面感但不虚构的专业表达：明确主体、动作区域、处理方式和结果，多用“突然起脚”"
+            "“迎球攻门”“门将飞身化解”“皮球擦柱而出”等与原始事实相符的动态句式，避免"
+            "逐词翻译和“获得任意球”“进行射门”等生硬表达。进球可用“球进了！”开场并点明"
+            "进球队员；关键扑救、门框、VAR、点球和红牌应明显增强张力；射门、角球、危险"
+            "任意球保持适度紧张；普通犯规、界外球、换人和伤停保持简洁克制。句式要有变化，"
+            "让连续几条解说听起来像真实比赛进程，而不是数据列表。只能润色原文明确给出的"
+            "事实：原文未写传中、助攻、跑位、球员位置、门将动作或皮球出界方式时，绝不能"
+            "自行补充；“射门被扑”不能擅自改写成“托出横梁”或“扑出底线”。"
+            "区域与方向是锁定字段，必须严格等价翻译，不能把上方中路写成死角或右上角。"
+            "原文未出现旋转、飞身、跃起、精准传中、速度或球员位置时禁止添加。感染力只能"
+            "来自短促开场、标点与句式节奏；输出前在内部进行事实核对并删除所有无来源修饰。"
+            "若事件写成“Goal! A 2, B 1”，只能表述为“A将比分改写为2比1”，不能误写成"
+            "两球领先、扳平或打破僵局。原文未明确射门方或扑救方时，不得擅自指定球队。"
             )
         elif mode.startswith("detail_narration"):
             instruction = (
@@ -314,16 +336,27 @@ class CommentaryService:
                 "不添加评论、判断或现场描写。"
             )
         prompt = (
-            f"你是专业足球文字直播编辑。{instruction}"
+            f"你是专业、敏锐且富有感染力的中文足球现场解说员。{instruction}"
             "可以润色语言和节奏，但不得虚构观众反应、现场画面、球员心理、战术意图、"
             "比赛重要性、动作细节或任何原文没有的事实。不得改变事件结果、主体、地点或比分。"
-            "不要在正文重复分钟或时间。单条尽量控制在42个汉字以内，确有必要时可稍长。"
+            "可以表达事件本身带来的精彩、紧张、遗憾或振奋感，但不得凭空描写看台与气氛。"
+            "正文绝对不能出现分钟、时间及其中文数字写法。普通事件控制在30至50个汉字，"
+            "重大事件可稍长。参考写法：英文若是“shot from outside the box is saved in the "
+            "top centre”，应写“禁区外突然起脚！射门直奔球门上方中路，门将将球扑出”，"
+            "不能写旋转、死角或飞身；若是“Goal! A 2, B 1. Header from the centre of the "
+            "box to the bottom right corner”，应写“球进了！A在禁区中央完成头球攻门，"
+            "皮球钻入右下角，比分改写为2比1！”。"
             "仅返回 JSON 数组，每项格式为 {\"sequence\":数字,\"text\":\"中文文本\"}。\n"
             f"比赛：{match.home.name} {match.home.score or '0'}-"
             f"{match.away.score or '0'} {match.away.name}\n"
             f"事件：{json.dumps(prompt_rows, ensure_ascii=False)}"
         )
-        response = self._chat(prompt, api_key, max_tokens=max(900, len(entries) * 75))
+        response = self._chat(
+            prompt,
+            api_key,
+            max_tokens=max(1100, len(entries) * 95),
+            temperature=0.22 if mode.startswith("narration") else 0.25,
+        )
         parsed = self._parse_event_response(response)
         return parsed
 
@@ -389,7 +422,7 @@ class CommentaryService:
             return cached
         rendered_timeline = self.event_texts(
             match.id,
-            mode="detail_narration_v3",
+            mode="detail_narration_v4",
         )
         full_timeline = [
             f"{self._summary_minute(entry.minute)} "
@@ -551,8 +584,10 @@ class CommentaryService:
         api_key: str,
     ) -> tuple[str, str]:
         prompt = (
-            "将足球新闻标题与摘要翻译并润色为简体中文，保持新闻事实和语气，"
-            "不要补充原文不存在的信息。人名和球队名必须严格使用给定术语表。"
+            "以中文专业足球资讯编辑的方式转述新闻标题与摘要，不要逐词硬译。保持新闻事实、"
+            "消息来源和不确定性语气，不要补充原文不存在的信息。人名和球队名必须严格使用"
+            "给定术语表；术语表未覆盖的专有名称采用中国大陆常见译名或自然音译，不能保留"
+            "整段英文标题或英文姓名。"
             "只返回 JSON 对象，字段为 title 和 summary。\n"
             f"术语表：{json.dumps(glossary, ensure_ascii=False)}\n"
             f"标题：{title}\n摘要：{summary}"
@@ -566,6 +601,49 @@ class CommentaryService:
         data = json.loads(candidate)
         return str(data.get("title") or title).strip(), str(data.get("summary") or summary).strip()
 
+    def rewrite_news_article(
+        self,
+        title: str,
+        summary: str,
+        content: str,
+        glossary: dict[str, str],
+        api_key: str,
+    ) -> tuple[str, str]:
+        prompt = (
+            "你是中文专业足球资讯编辑。请依据给定英文标题、摘要与完整正文，重新组织为适合"
+            "中文读者阅读的完整资讯稿，不必逐句硬译，但必须保留原文中的核心事实、金额、日期、"
+            "人物关系、消息来源和不确定性表述。删除网页导航、相关推荐、广告语和重复段落。"
+            "语言应自然、清晰、有专业体育媒体质感；不得添加原文没有的转会结果、评价、背景、"
+            "因果或预测。人名与球队名必须严格使用术语表。输出4至8个短段落，并只返回 JSON："
+            "{\"title\":\"中文标题\",\"content\":\"中文全文，段落之间用两个换行\"}。\n"
+            f"术语表：{json.dumps(glossary, ensure_ascii=False)}\n"
+            f"标题：{title}\n摘要：{summary}\n正文：{content[:12000]}"
+        )
+        text = self._chat(
+            prompt,
+            api_key,
+            max_tokens=2600,
+            timeout_seconds=100,
+            temperature=0.42,
+        )
+        candidate = text.strip()
+        fenced = re.search(
+            r"```(?:json)?\s*(.*?)```",
+            candidate,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fenced:
+            candidate = fenced.group(1).strip()
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        data = json.loads(
+            candidate[start:end + 1] if start >= 0 and end > start else candidate
+        )
+        return (
+            str(data.get("title") or "").strip(),
+            str(data.get("content") or "").strip(),
+        )
+
     def translate_news_batch(
         self,
         items: list[dict[str, str]],
@@ -573,8 +651,10 @@ class CommentaryService:
         api_key: str,
     ) -> dict[str, tuple[str, str]]:
         prompt = (
-            "批量翻译并润色以下足球新闻为简体中文，保持事实，不增加原文没有的信息。"
-            "人名和球队名必须严格使用术语表。只返回 JSON 对象，键为新闻 id，"
+            "以中文专业足球资讯编辑的方式批量转述以下新闻标题与摘要，语言自然、简洁，避免"
+            "逐词硬译和英文语序。保持事实、消息来源与不确定性，不增加原文没有的信息。"
+            "人名和球队名必须严格使用术语表；术语表未覆盖的专有名称采用中国大陆常见译名"
+            "或自然音译，不能保留整段英文标题或英文姓名。只返回 JSON 对象，键为新闻 id，"
             "值为含 title 与 summary 的对象。\n"
             f"术语表：{json.dumps(glossary, ensure_ascii=False)}\n"
             f"新闻：{json.dumps(items, ensure_ascii=False)}"
@@ -611,6 +691,7 @@ class CommentaryService:
         api_key: str,
         max_tokens: int,
         timeout_seconds: int = 45,
+        temperature: float = 0.25,
     ) -> str:
         key = (api_key or os.environ.get("AGNES_API_KEY") or "").strip()
         if not key:
@@ -624,7 +705,7 @@ class CommentaryService:
                 },
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.25,
+            "temperature": max(0.0, min(1.0, float(temperature))),
             "max_tokens": max_tokens,
         }
         with self.request_lock:
@@ -664,8 +745,17 @@ class CommentaryService:
         try:
             rows = json.loads(candidate)
         except json.JSONDecodeError:
-            return {}
+            rows = []
+            for match in re.finditer(r"\{[^{}]*\}", candidate, flags=re.DOTALL):
+                try:
+                    row = json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(row, dict):
+                    rows.append(row)
         result: dict[int, str] = {}
+        if isinstance(rows, dict):
+            rows = [rows]
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict):
                 continue
@@ -759,6 +849,12 @@ class CommentaryService:
         )
         value = re.sub(
             r"^\s*\d+(?:\+\d+)?\s*['’′]?\s*[!！，,:：、|｜\s-]+",
+            "",
+            value,
+        )
+        value = re.sub(
+            r"^\s*[零〇一二三四五六七八九十百两]+(?:个)?分钟"
+            r"[，,:：、|｜\s-]*",
             "",
             value,
         )

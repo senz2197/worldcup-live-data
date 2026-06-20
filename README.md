@@ -46,11 +46,15 @@ WorldCupFloat_Portable.zip
 - Windows OneCore and legacy SAPI voices remain automatic offline fallbacks
 - Live commentary is polled independently every two seconds and shows new source events immediately while translation is pending
 - League news tab with one-to-twelve-week filtering, favorite-team priority, translated summaries, and original-source links
+- AI-first Chinese news rewriting with full ESPN article retrieval and free translation fallback
+- News cards and details never fall back to displaying untranslated English copy
 - Free machine translation fallback for commentary and news when AI is disabled or unavailable
 - Player rosters refresh every 24 hours by default, with a configurable interval
 - Official rights-holder links for live matches and fixtures starting within five minutes
 - Optional compact live-source labels beneath the centered score; completed match details omit live links
 - Live speech reads commentary content only, without announcing the match minute
+- More expressive professional live commentary prompts with strict source-fact safeguards
+- Match stage and status headers share space and scale together without clipping at compact widths
 - Full match commentary timelines and cached AI post-match summaries
 
 ## Data Sources
