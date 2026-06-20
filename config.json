@@ -17,7 +17,7 @@
     "LIVE": "#ff6a6a"
   },
   "quick_refresh": false,
-  "show_status": true,
+  "show_status": false,
   "match_notifications": true,
   "ai_commentary": true,
   "ai_translate_raw": false,
@@ -27,7 +27,7 @@
   "alpha": 0.93,
   "window_geometry": "378x593+2164+743",
   "live_refresh_seconds": 5,
-  "default_refresh_seconds": 15,
+  "default_refresh_seconds": 300,
   "ui_font": "Microsoft YaHei UI",
   "score_font": "Bahnschrift SemiBold"
 }

@@ -11,6 +11,7 @@ import tempfile
 import threading
 import traceback
 import urllib.request
+import webbrowser
 import weakref
 import zipfile
 from collections import deque
@@ -55,7 +56,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.2.4"
+APP_VERSION = "1.2.5"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -131,6 +132,62 @@ PALETTE_PRESETS = {
         "ACCENT_2": "#66b7ff",
         "WARNING": "#ffd166",
         "LIVE": "#ff5a72",
+    },
+    "porcelain": {
+        "label": "瓷白青绿",
+        "BG": "#f4f7f6",
+        "PANEL": "#ffffff",
+        "PANEL_2": "#e9efed",
+        "PANEL_3": "#dce6e2",
+        "LINE": "#c6d2ce",
+        "TEXT": "#17221f",
+        "MUTED": "#687873",
+        "ACCENT": "#168568",
+        "ACCENT_2": "#496f9f",
+        "WARNING": "#a76b0b",
+        "LIVE": "#c94459",
+    },
+    "mist": {
+        "label": "雾蓝纸张",
+        "BG": "#f1f5f8",
+        "PANEL": "#fbfdff",
+        "PANEL_2": "#e6edf3",
+        "PANEL_3": "#d9e3ec",
+        "LINE": "#c2cfda",
+        "TEXT": "#1c2730",
+        "MUTED": "#687986",
+        "ACCENT": "#287f77",
+        "ACCENT_2": "#5075ad",
+        "WARNING": "#a76c17",
+        "LIVE": "#ca4b61",
+    },
+    "sage": {
+        "label": "鼠尾草白",
+        "BG": "#f3f5f0",
+        "PANEL": "#fcfdf9",
+        "PANEL_2": "#e8ece3",
+        "PANEL_3": "#dce3d7",
+        "LINE": "#c7d0c1",
+        "TEXT": "#202820",
+        "MUTED": "#6d796b",
+        "ACCENT": "#477a61",
+        "ACCENT_2": "#5f739b",
+        "WARNING": "#9d6a1c",
+        "LIVE": "#c64f59",
+    },
+    "pearl": {
+        "label": "珍珠柔灰",
+        "BG": "#f4f4f5",
+        "PANEL": "#fdfdfd",
+        "PANEL_2": "#e9e9eb",
+        "PANEL_3": "#dedee1",
+        "LINE": "#cacbd0",
+        "TEXT": "#232429",
+        "MUTED": "#70737b",
+        "ACCENT": "#377b6c",
+        "ACCENT_2": "#6375a5",
+        "WARNING": "#a46e1d",
+        "LIVE": "#c94d60",
     },
 }
 PALETTE_KEYS = ("BG", "PANEL", "PANEL_2", "PANEL_3", "LINE", "TEXT", "MUTED", "ACCENT", "ACCENT_2", "WARNING", "LIVE")
@@ -603,6 +660,8 @@ class WorldCupFloatApp:
         self.window_visible = True
         self.context_menu: tk.Menu | None = None
         self.settings_popup: tk.Toplevel | None = None
+        self.api_help_popup: tk.Toplevel | None = None
+        self.player_popup: tk.Toplevel | None = None
         self.match_popup: tk.Toplevel | None = None
         self.match_popup_match_id = ""
         self.match_popup_opening = False
@@ -613,6 +672,7 @@ class WorldCupFloatApp:
         self.drag_target: tk.Tk | tk.Toplevel | None = None
         self.pointer_origin = (0, 0)
         self.pointer_dragged = False
+        self.popups_at_pointer_press: list[tk.Toplevel] = []
         self.resize_origin = (0, 0, 0, 0)
         self.title_label: tk.Label | None = None
         self.status_label: tk.Label | None = None
@@ -639,16 +699,16 @@ class WorldCupFloatApp:
         self.topmost_var = tk.BooleanVar(value=bool(self.config.get("topmost", True)))
         self.use_english_var = tk.BooleanVar(value=bool(self.config.get("use_english", False)))
         self.quick_refresh_var = tk.BooleanVar(value=bool(self.config.get("quick_refresh", False)))
-        self.show_status_var = tk.BooleanVar(value=bool(self.config.get("show_status", True)))
+        self.show_status_var = tk.BooleanVar(value=bool(self.config.get("show_status", False)))
         self.match_notifications_var = tk.BooleanVar(value=bool(self.config.get("match_notifications", True)))
         self.ai_commentary_var = tk.BooleanVar(value=bool(self.config.get("ai_commentary", True)))
         self.ai_translate_raw_var = tk.BooleanVar(value=bool(self.config.get("ai_translate_raw", False)))
         self.commentary_lines_var = tk.IntVar(value=self._valid_commentary_lines(self.config.get("commentary_lines"), 3))
         self.agnes_api_key_var = tk.StringVar(value=str(self.secrets.get("agnes_api_key") or ""))
-        self.ai_status_var = tk.StringVar(value="Agnes AI 已启用" if self.agnes_api_key_var.get().strip() else "未设置 API Key，将显示原始数据")
+        self.ai_status_var = tk.StringVar(value="AI 已启用" if self.agnes_api_key_var.get().strip() else "未设置 API Key，将显示原始数据")
         self.ai_cache_status_var = tk.StringVar(value=self._ai_cache_status_text())
         self.live_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("live_refresh_seconds"), 5))
-        self.default_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("default_refresh_seconds"), 15))
+        self.default_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("default_refresh_seconds"), 300))
         self.update_status_var = tk.StringVar(value=f"当前版本 {APP_VERSION}")
         self.root.attributes("-alpha", max(0.72, min(1.0, float(self.alpha_var.get()))))
         self.root.attributes("-topmost", self.topmost_var.get())
@@ -730,7 +790,7 @@ class WorldCupFloatApp:
                         "palette": self._valid_palette_name(self.palette_var.get()),
                         "custom_palette": palette,
                         "quick_refresh": bool(self.quick_refresh_var.get()) if hasattr(self, "quick_refresh_var") else False,
-                        "show_status": bool(self.show_status_var.get()) if hasattr(self, "show_status_var") else True,
+                        "show_status": bool(self.show_status_var.get()) if hasattr(self, "show_status_var") else False,
                         "match_notifications": bool(self.match_notifications_var.get()) if hasattr(self, "match_notifications_var") else True,
                         "ai_commentary": bool(self.ai_commentary_var.get()) if hasattr(self, "ai_commentary_var") else True,
                         "ai_translate_raw": bool(self.ai_translate_raw_var.get()) if hasattr(self, "ai_translate_raw_var") else False,
@@ -740,7 +800,7 @@ class WorldCupFloatApp:
                         "alpha": round(float(self.alpha_var.get()), 2) if hasattr(self, "alpha_var") else 0.93,
                         "window_geometry": self.root.geometry() if hasattr(self, "root") else "",
                         "live_refresh_seconds": self._valid_seconds(self.live_refresh_seconds_var.get(), 5) if hasattr(self, "live_refresh_seconds_var") else 5,
-                        "default_refresh_seconds": self._valid_seconds(self.default_refresh_seconds_var.get(), 15) if hasattr(self, "default_refresh_seconds_var") else 15,
+                        "default_refresh_seconds": self._valid_seconds(self.default_refresh_seconds_var.get(), 300) if hasattr(self, "default_refresh_seconds_var") else 300,
                         "ui_font": self._valid_font_name(self.ui_font_var.get(), DEFAULT_UI_FONT) if hasattr(self, "ui_font_var") else DEFAULT_UI_FONT,
                         "score_font": self._valid_font_name(self.score_font_var.get(), DEFAULT_SCORE_FONT) if hasattr(self, "score_font_var") else DEFAULT_SCORE_FONT,
                     },
@@ -758,6 +818,16 @@ class WorldCupFloatApp:
         if self.settings_popup is not None and self.settings_popup.winfo_exists():
             self.settings_popup.destroy()
         self.settings_popup = None
+
+    def _close_api_help(self) -> None:
+        if self.api_help_popup is not None and self.api_help_popup.winfo_exists():
+            self.api_help_popup.destroy()
+        self.api_help_popup = None
+
+    def _close_player_popup(self) -> None:
+        if self.player_popup is not None and self.player_popup.winfo_exists():
+            self.player_popup.destroy()
+        self.player_popup = None
 
     def _valid_color(self, value: str | None, fallback: str = ACCENT) -> str:
         value = str(value or "").strip()
@@ -782,7 +852,7 @@ class WorldCupFloatApp:
             seconds = int(value)
         except (TypeError, ValueError):
             return fallback
-        return max(3, min(seconds, 180))
+        return max(3, min(seconds, 3600))
 
     def _valid_commentary_lines(self, value, fallback: int = 3) -> int:
         try:
@@ -831,7 +901,13 @@ class WorldCupFloatApp:
         self.ui_font_var.set(self._valid_font_name(self.ui_font_var.get(), DEFAULT_UI_FONT))
         self.score_font_var.set(self._valid_font_name(self.score_font_var.get(), DEFAULT_SCORE_FONT))
         self._apply_fonts_to_tree(self.root)
-        for popup in (self.settings_popup, self.match_popup, self.match_notification_popup):
+        for popup in (
+            self.settings_popup,
+            self.api_help_popup,
+            self.player_popup,
+            self.match_popup,
+            self.match_notification_popup,
+        ):
             if popup is not None and popup.winfo_exists():
                 self._apply_fonts_to_tree(popup)
         self._save_config()
@@ -840,7 +916,7 @@ class WorldCupFloatApp:
         value = str(value or "").strip()
         if value in PALETTE_PRESETS or value == "custom":
             return value
-        return "codex"
+        return "atelier"
 
     def _palette_from_config(self) -> dict[str, str]:
         name = self._valid_palette_name(self.config.get("palette"))
@@ -879,6 +955,10 @@ class WorldCupFloatApp:
                 self._restyle_widget_tree(self.settings_popup, old, clean)
             if self.match_notification_popup is not None and self.match_notification_popup.winfo_exists():
                 self._restyle_widget_tree(self.match_notification_popup, old, clean)
+            if self.api_help_popup is not None and self.api_help_popup.winfo_exists():
+                self._restyle_widget_tree(self.api_help_popup, old, clean)
+            if self.player_popup is not None and self.player_popup.winfo_exists():
+                self._restyle_widget_tree(self.player_popup, old, clean)
             self._configure_fonts()
             self._invalidate_render_cache()
             self.render_active()
@@ -895,7 +975,7 @@ class WorldCupFloatApp:
         color_map = {old[key]: new[key] for key in PALETTE_KEYS if key in old and key in new}
         for option in ("bg", "fg", "activebackground", "activeforeground", "selectcolor", "highlightbackground", "insertbackground"):
             try:
-                current = widget.cget(option)
+                current = str(widget.cget(option))
             except tk.TclError:
                 continue
             if current in color_map:
@@ -1027,7 +1107,7 @@ class WorldCupFloatApp:
 
     def _save_refresh_settings(self, *_args) -> None:
         self.live_refresh_seconds_var.set(self._valid_seconds(self.live_refresh_seconds_var.get(), 5))
-        self.default_refresh_seconds_var.set(self._valid_seconds(self.default_refresh_seconds_var.get(), 15))
+        self.default_refresh_seconds_var.set(self._valid_seconds(self.default_refresh_seconds_var.get(), 300))
         self._save_config()
 
     def _save_commentary_settings(self, *_args) -> None:
@@ -1061,19 +1141,121 @@ class WorldCupFloatApp:
         self._save_config()
         self._save_secrets()
         if not key:
-            self.ai_status_var.set("请先填写 Agnes API Key")
+            self.ai_status_var.set("请先填写 AI API Key")
             return
-        self.ai_status_var.set("正在测试 Agnes AI...")
+        self.ai_status_var.set("正在测试 AI 连接...")
 
         def worker() -> None:
             try:
                 result = self.commentary_service.test(key)
-                status = "Agnes AI 连接成功" if result else "Agnes AI 返回为空"
+                status = "AI 连接成功" if result else "AI 返回为空"
             except Exception as exc:
                 status = f"连接失败：{exc}"
             self._post_ui(lambda text=status: self.ai_status_var.set(text))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _open_api_help(self) -> None:
+        if self.api_help_popup is not None and self.api_help_popup.winfo_exists():
+            self.api_help_popup.lift()
+            return
+        popup = tk.Toplevel(self.root)
+        self.api_help_popup = popup
+        popup.overrideredirect(True)
+        popup.configure(bg=PANEL)
+        popup.attributes("-topmost", True)
+        popup.attributes("-alpha", 0.98)
+        width = min(350, max(300, self.root.winfo_width() - 8))
+        height = 310
+        x = min(
+            max(8, self.root.winfo_x() + 14),
+            max(8, self.root.winfo_screenwidth() - width - 8),
+        )
+        y = min(
+            max(8, self.root.winfo_y() + 48),
+            max(8, self.root.winfo_screenheight() - height - 48),
+        )
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+        popup.bind(
+            "<Destroy>",
+            lambda event, current=popup:
+            setattr(self, "api_help_popup", None)
+            if event.widget is current and self.api_help_popup is current else None,
+            add="+",
+        )
+
+        header = tk.Frame(popup, bg=PANEL, padx=12, pady=9)
+        header.pack(fill="x")
+        title = tk.Label(
+            header,
+            text="如何获取免费 API Key",
+            bg=PANEL,
+            fg=TEXT,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        title.pack(side="left")
+        close = tk.Label(
+            header,
+            text="×",
+            bg=PANEL,
+            fg=MUTED,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        close.pack(side="right")
+        self._bind_click(close, lambda _event: self._close_api_help())
+        self._bind_drag(header)
+        self._bind_drag(title)
+
+        body = tk.Frame(popup, bg=PANEL, padx=12, pady=8)
+        body.pack(fill="both", expand=True)
+        steps = (
+            "1. 打开 Agnes AI 平台并注册或登录账号。\n"
+            "2. 进入 API Key 管理页面，创建一个免费 API Key。\n"
+            "3. 复制生成的 Key，粘贴到设置中的“AI API Key”。\n"
+            "4. 点击“测试”，显示连接成功后即可使用。"
+        )
+        guide = tk.Label(
+            body,
+            text=steps,
+            bg=PANEL,
+            fg=TEXT,
+            anchor="nw",
+            justify="left",
+            font=("Microsoft YaHei UI", 9),
+        )
+        guide.pack(fill="x")
+        self._bind_wrap(guide, reserve=8, minimum=220, maximum=318)
+        link = tk.Label(
+            body,
+            text="打开 Agnes AI 免费申请页面",
+            bg=PANEL_2,
+            fg=ACCENT,
+            cursor="hand2",
+            anchor="center",
+            font=("Microsoft YaHei UI", 9, "bold"),
+            padx=10,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground=LINE,
+        )
+        link.pack(fill="x", pady=(14, 8))
+        self._bind_click(
+            link,
+            lambda _event: webbrowser.open("https://platform.agnes-ai.com/"),
+        )
+        note = tk.Label(
+            body,
+            text="免费额度与可用模型以 Agnes AI 平台当前规则为准。",
+            bg=PANEL,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            font=("Microsoft YaHei UI", 8),
+        )
+        note.pack(fill="x")
+        self._bind_wrap(note, reserve=8, minimum=220, maximum=318)
+        self._apply_fonts_to_tree(popup)
 
     def _ai_cache_status_text(self, prefix: str = "") -> str:
         info = self.commentary_service.cache_info()
@@ -1828,6 +2010,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _global_pointer_press(self, event: tk.Event) -> None:
         self.pointer_origin = (event.x_root, event.y_root)
         self.pointer_dragged = False
+        self.popups_at_pointer_press = self._existing_popups()
 
     def _global_pointer_motion(self, event: tk.Event) -> None:
         if abs(event.x_root - self.pointer_origin[0]) > 5 or abs(event.y_root - self.pointer_origin[1]) > 5:
@@ -1836,8 +2019,45 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _global_pointer_release(self, event: tk.Event) -> None:
         if self.pointer_dragged:
             return
-        self._maybe_close_match_popup(event)
-        self._maybe_close_match_notification(event)
+        try:
+            clicked_main = event.widget.winfo_toplevel() is self.root
+        except tk.TclError:
+            clicked_main = False
+        if clicked_main:
+            self._close_popups(self.popups_at_pointer_press)
+        self.popups_at_pointer_press = []
+
+    def _existing_popups(self) -> list[tk.Toplevel]:
+        result: list[tk.Toplevel] = []
+        for popup in (
+            self.settings_popup,
+            self.api_help_popup,
+            self.player_popup,
+            self.match_popup,
+            self.match_notification_popup,
+        ):
+            try:
+                if popup is not None and popup.winfo_exists():
+                    result.append(popup)
+            except tk.TclError:
+                continue
+        return result
+
+    def _close_popups(self, popups: list[tk.Toplevel]) -> None:
+        for popup in popups:
+            if popup is self.settings_popup:
+                self._close_settings()
+            elif popup is self.api_help_popup:
+                self._close_api_help()
+            elif popup is self.player_popup:
+                self._close_player_popup()
+            elif popup is self.match_popup:
+                self._close_match_popup(popup)
+            elif popup is self.match_notification_popup:
+                self._close_match_notification()
+
+    def _close_all_popups(self) -> None:
+        self._close_popups(self._existing_popups())
 
     def _bind_click(self, widget: tk.Widget, command, add: str = "+") -> None:
         state = {"origin": (0, 0), "dragged": False}
@@ -1899,18 +2119,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
     def hide_window(self) -> None:
         self._save_config()
-        if self.settings_popup is not None and self.settings_popup.winfo_exists():
-            self.settings_popup.withdraw()
-        self._close_match_popup()
+        self._close_all_popups()
         self.root.withdraw()
         self.window_visible = False
 
     def show_window(self) -> None:
         self.root.deiconify()
         self.root.lift()
-        if self.settings_popup is not None and self.settings_popup.winfo_exists():
-            self.settings_popup.deiconify()
-            self.settings_popup.lift()
         self.root.attributes("-topmost", self.topmost_var.get())
         self.window_visible = True
         self._mark_as_tool_window()
@@ -1931,6 +2146,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         try:
             if self.settings_popup is not None:
                 self.settings_popup.destroy()
+            if self.api_help_popup is not None:
+                self.api_help_popup.destroy()
+            if self.player_popup is not None:
+                self.player_popup.destroy()
         except Exception:
             pass
         self.root.destroy()
@@ -2230,7 +2449,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         commentary_panel.pack(fill="x", pady=(3, 10))
         tk.Checkbutton(
             commentary_panel,
-            text="使用 Agnes AI 生成中文解说",
+            text="使用 AI 生成中文解说",
             variable=self.ai_commentary_var,
             command=self._toggle_ai_commentary,
             bg=PANEL_2,
@@ -2267,7 +2486,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         lines_entry.pack(side="right", ipady=3)
         lines_entry.bind("<Return>", self._save_commentary_settings)
         lines_entry.bind("<FocusOut>", self._save_commentary_settings)
-        tk.Label(commentary_panel, text="Agnes API Key", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(8, 3))
+        tk.Label(commentary_panel, text="AI API Key", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(8, 3))
         key_row = tk.Frame(commentary_panel, bg=PANEL_2)
         key_row.pack(fill="x")
         key_entry = tk.Entry(
@@ -2293,6 +2512,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             justify="left",
             font=("Microsoft YaHei UI", 8),
         ).pack(fill="x", pady=(6, 0))
+        help_link = tk.Label(
+            commentary_panel,
+            text="如何获取免费 API Key",
+            bg=PANEL_2,
+            fg=ACCENT,
+            cursor="hand2",
+            anchor="w",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        help_link.pack(fill="x", pady=(8, 0))
+        self._bind_click(help_link, lambda _event: self._open_api_help())
 
         tk.Label(body, text="AI 缓存", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
         cache_panel = tk.Frame(body, bg=PANEL_2, padx=9, pady=8, highlightthickness=1, highlightbackground=LINE)
@@ -2867,7 +3097,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             translations: dict[int, str] = {}
             error = source_error or ""
             if not error and not api_key:
-                error = "未设置 Agnes API Key"
+                error = "未设置 AI API Key"
             if not error and entries:
                 try:
                     translations = self.commentary_service.translate_complete_timeline(
@@ -2939,7 +3169,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             return
         api_key = self.agnes_api_key_var.get().strip()
         if not api_key:
-            self.summary_errors[match.id] = "未设置 Agnes API Key，暂时无法生成比赛总结。"
+            self.summary_errors[match.id] = "未设置 AI API Key，暂时无法生成比赛总结。"
             self._update_summary_label(match.id)
             return
         self.summary_loading.add(match.id)
@@ -3533,7 +3763,6 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         def toggle_detail(_event: tk.Event, current: Match = match) -> None:
             if self.match_popup is not None and self.match_popup.winfo_exists():
                 self._close_match_popup()
-                return
             self._open_match_detail(current)
 
         self._bind_click(widget, toggle_detail)
@@ -3626,13 +3855,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             fg=TEXT,
             font=("Microsoft YaHei UI", 11, "bold"),
         ).pack(side="left", padx=(7, 0))
-        tk.Label(
+        close = tk.Label(
             title_row,
-            text="点击关闭",
+            text="×",
             bg=PANEL,
             fg=MUTED,
-            font=("Microsoft YaHei UI", 8),
-        ).pack(side="right")
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        close.pack(side="right")
+        self._bind_click(close, lambda _event: self._close_match_notification())
+        self._bind_drag(title_row)
 
         for match in visible_matches:
             row = tk.Frame(shell, bg=PANEL_2, padx=9, pady=7, highlightthickness=1, highlightbackground=LINE)
@@ -3666,7 +3899,6 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 font=("Microsoft YaHei UI", 8),
             ).pack(anchor="w", pady=(5, 0))
 
-        self._bind_notification_close(popup)
         self._apply_fonts_to_tree(popup)
         popup.update_idletasks()
         height = min(
@@ -3721,6 +3953,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         header.pack(fill="x")
         header_label = tk.Label(header, text="对局资料", bg=PANEL, fg=ACCENT, font=("Microsoft YaHei UI", 11, "bold"))
         header_label.pack(side="left")
+        close = tk.Label(
+            header,
+            text="×",
+            bg=PANEL,
+            fg=MUTED,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        close.pack(side="right")
+        self._bind_click(close, lambda _event: self._close_match_popup())
         self._bind_drag(header)
         self._bind_drag(header_label)
         body = ScrollFrame(popup, bg=PANEL)
@@ -4386,20 +4628,32 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.render_team()
 
     def _open_player_detail(self, player: Player) -> None:
+        self._close_player_popup()
         popup = tk.Toplevel(self.root)
+        self.player_popup = popup
         popup.overrideredirect(True)
         popup.configure(bg=PANEL)
         popup.attributes("-topmost", True)
         popup.attributes("-alpha", 0.97)
+        popup.bind(
+            "<Destroy>",
+            lambda event, current=popup:
+            setattr(self, "player_popup", None)
+            if event.widget is current and self.player_popup is current else None,
+            add="+",
+        )
         width = min(330, max(280, self.root.winfo_width() - 24))
         height = min(470, max(360, self.root.winfo_height() - 40))
         popup.geometry(f"{width}x{height}+{self.root.winfo_x() + 12}+{self.root.winfo_y() + 24}")
         header = tk.Frame(popup, bg=PANEL, padx=12, pady=10)
         header.pack(fill="x")
-        tk.Label(header, text="球员详情", bg=PANEL, fg=ACCENT, font=("Microsoft YaHei UI", 11, "bold")).pack(side="left")
+        title = tk.Label(header, text="球员详情", bg=PANEL, fg=ACCENT, font=("Microsoft YaHei UI", 11, "bold"))
+        title.pack(side="left")
         close = tk.Label(header, text="×", bg=PANEL, fg=MUTED, cursor="hand2", font=("Microsoft YaHei UI", 13, "bold"))
         close.pack(side="right")
-        self._bind_click(close, lambda _event: popup.destroy())
+        self._bind_click(close, lambda _event: self._close_player_popup())
+        self._bind_drag(header)
+        self._bind_drag(title)
         body = ScrollFrame(popup, bg=PANEL)
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self._player_detail(body.body, player)

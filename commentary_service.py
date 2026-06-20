@@ -184,7 +184,7 @@ class CommentaryService:
             mode,
         )
         if not parsed:
-            raise RuntimeError("Agnes 未返回可识别的事件文本")
+            raise RuntimeError("AI 服务未返回可识别的事件文本")
         self._store_event_texts(match.id, mode, parsed, generation)
         return self.event_texts(match.id, mode=mode)
 
@@ -447,7 +447,7 @@ class CommentaryService:
         )
         draft = self._trim_summary(self._chat(prompt, api_key, max_tokens=1500).strip(), limit=650)
         if not draft:
-            raise RuntimeError("Agnes 未返回比赛总结")
+            raise RuntimeError("AI 服务未返回比赛总结")
         audit_prompt = (
             "你是足球稿件事实审校员。请逐句核对草稿与所给完整时间线、比分和可信统计，"
             "重写为300至450字的最终中文复盘。只保留资料能够直接证明的内容。"
@@ -472,7 +472,7 @@ class CommentaryService:
         text = self._limit_summary_time_references(structured or audited, limit=5)
         text = self._trim_summary(text, limit=460)
         if not text:
-            raise RuntimeError("Agnes 未返回事实审校后的比赛总结")
+            raise RuntimeError("AI 服务未返回事实审校后的比赛总结")
         with self.lock:
             if generation != self.cache_generation:
                 return text
@@ -511,7 +511,7 @@ class CommentaryService:
     ) -> str:
         key = (api_key or os.environ.get("AGNES_API_KEY") or "").strip()
         if not key:
-            raise RuntimeError("未设置 Agnes API Key")
+            raise RuntimeError("未设置 AI API Key")
         payload = {
             "model": AGNES_MODEL,
             "messages": [
@@ -545,7 +545,7 @@ class CommentaryService:
                 self.last_request_at = time.monotonic()
         choices = data.get("choices") or []
         if not choices:
-            raise RuntimeError(str(data.get("error") or "Agnes 返回为空"))
+            raise RuntimeError(str(data.get("error") or "AI 服务返回为空"))
         message = choices[0].get("message") or {}
         return str(message.get("content") or "")
 
