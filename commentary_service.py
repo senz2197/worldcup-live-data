@@ -489,6 +489,58 @@ class CommentaryService:
         text = self._chat("只回复：连接成功", api_key, max_tokens=20)
         return text.strip()
 
+    def localize_football_names(
+        self,
+        names: list[str],
+        kind: str,
+        api_key: str,
+    ) -> dict[str, str]:
+        unique = list(dict.fromkeys(
+            str(name).strip()
+            for name in names
+            if str(name).strip()
+        ))
+        if not unique:
+            return {}
+        label = "职业足球运动员" if kind == "player" else "足球俱乐部"
+        prompt = (
+            f"请将下列{label}名称转换为中国大陆足球媒体最常用、严谨统一的简体中文名称。"
+            "优先采用新华社、主流体育媒体及长期通行译名；无公认译名时进行自然音译。"
+            "不得翻译成含义解释，不得遗漏。仅返回 JSON 对象，键必须保持原英文名称完全一致，"
+            "值为中文名称。\n"
+            f"名称：{json.dumps(unique, ensure_ascii=False)}"
+        )
+        response = self._chat(
+            prompt,
+            api_key,
+            max_tokens=max(900, len(unique) * 35),
+            timeout_seconds=90,
+        )
+        candidate = response.strip()
+        fenced = re.search(
+            r"```(?:json)?\s*(.*?)```",
+            candidate,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if fenced:
+            candidate = fenced.group(1).strip()
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start >= 0 and end > start:
+            candidate = candidate[start : end + 1]
+        try:
+            rows = json.loads(candidate)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(rows, dict):
+            return {}
+        allowed = set(unique)
+        return {
+            str(source): str(translated).strip()
+            for source, translated in rows.items()
+            if source in allowed and str(translated).strip()
+        }
+
     def summary_signature(self, match: Match, entries: list[CommentaryEntry]) -> str:
         latest = entries[-1].sequence if entries else -1
         return f"deep-v8:{match.home.score}-{match.away.score}:{latest}:{len(entries)}"

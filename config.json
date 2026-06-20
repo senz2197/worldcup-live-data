@@ -1,5 +1,15 @@
 {
   "title": "世界杯实时数据",
+  "active_competition": "worldcup",
+  "competition_titles": {
+    "worldcup": "世界杯实时数据",
+    "premier_league": "英超实时数据",
+    "laliga": "西甲实时数据",
+    "bundesliga": "德甲实时数据",
+    "serie_a": "意甲实时数据",
+    "ligue_1": "法甲实时数据"
+  },
+  "favorite_teams": {},
   "theme_color": "#e8b45c",
   "icon_choice": "icon_1",
   "palette": "atelier",

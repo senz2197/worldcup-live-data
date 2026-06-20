@@ -22,7 +22,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 
 from commentary_service import CommentaryService
-from data_provider import CommentaryEntry, DataProvider, LeaderRow, Leaderboard, Match, MatchTeam, Player, Snapshot, Team
+from data_provider import COMPETITIONS, CommentaryEntry, DataProvider, LeaderRow, Leaderboard, Match, MatchTeam, Player, Snapshot, Team
 from localization import NameLocalizer
 
 
@@ -56,7 +56,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.3.0"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -597,7 +597,27 @@ class WorldCupFloatApp:
         self.available_fonts = sorted(set(tkfont.families(self.root)), key=str.casefold)
         self.ui_font_var = tk.StringVar(value=self._valid_font_name(self.config.get("ui_font"), DEFAULT_UI_FONT))
         self.score_font_var = tk.StringVar(value=self._valid_font_name(self.config.get("score_font"), DEFAULT_SCORE_FONT))
-        self.app_title_var = tk.StringVar(value=self.config.get("title") or DEFAULT_APP_TITLE)
+        configured_titles = self.config.get("competition_titles")
+        self.competition_titles = {
+            key: str(
+                (configured_titles or {}).get(key)
+                or (
+                    self.config.get("title")
+                    if key == "worldcup"
+                    else ""
+                )
+                or data["title"]
+            )
+            for key, data in COMPETITIONS.items()
+        }
+        self.active_competition_key = (
+            self.config.get("active_competition")
+            if self.config.get("active_competition") in COMPETITIONS
+            else "worldcup"
+        )
+        self.app_title_var = tk.StringVar(
+            value=self.competition_titles[self.active_competition_key]
+        )
         self.palette_var = tk.StringVar(value=self._valid_palette_name(self.config.get("palette")))
         self.palette_colors = self._palette_from_config()
         self._apply_palette_values(self.palette_colors, persist=False, restyle=False)
@@ -612,7 +632,9 @@ class WorldCupFloatApp:
         self.root.bind_all("<B1-Motion>", self._global_pointer_motion, add="+")
         self.root.bind_all("<ButtonRelease-1>", self._global_pointer_release, add="+")
 
-        self.provider = DataProvider()
+        self.provider = DataProvider(
+            competition_key=self.active_competition_key
+        )
         self.commentary_service = CommentaryService(self.provider.cache_dir)
         self.ai_prewarm_running = False
         self.ai_prewarm_scheduled = False
@@ -620,8 +642,29 @@ class WorldCupFloatApp:
         self.root.report_callback_exception = self._log_tk_exception
         self.images = ImageCache(self.root, self.provider.cache_dir / "images", on_loaded=self._schedule_image_refresh)
         self.localizer = NameLocalizer()
+        self.name_cache_path = self.provider.cache_dir / "ai_name_localization.json"
+        self.name_localization_cache = self._load_name_localization_cache()
+        self.localizer.teams_by_name.update(
+            self.name_localization_cache.get("teams", {})
+        )
+        self.localizer.players.update(
+            self.name_localization_cache.get("players", {})
+        )
+        self.name_localization_loading: set[str] = set()
         self.snapshot: Snapshot | None = None
+        self.snapshot_cache: dict[str, Snapshot] = {}
         self.active_tab = "live"
+        self.round_selection: dict[str, str] = {
+            "upcoming": "current",
+            "results": "current",
+        }
+        self.favorite_teams: dict[str, str] = {
+            key: str(value)
+            for key, value in (
+                self.config.get("favorite_teams") or {}
+            ).items()
+            if key in COMPETITIONS
+        }
         self.team_options: dict[str, str] = {"全部球队": ""}
         self.selected_team_id = ""
         self.selected_player_id = ""
@@ -660,8 +703,13 @@ class WorldCupFloatApp:
         self.window_visible = True
         self.context_menu: tk.Menu | None = None
         self.settings_popup: tk.Toplevel | None = None
+        self.competition_popup: tk.Toplevel | None = None
         self.api_help_popup: tk.Toplevel | None = None
         self.player_popup: tk.Toplevel | None = None
+        self.player_popup_body: tk.Widget | None = None
+        self.player_popup_player_id = ""
+        self.club_popup: tk.Toplevel | None = None
+        self.club_popup_body: tk.Widget | None = None
         self.match_popup: tk.Toplevel | None = None
         self.match_popup_match_id = ""
         self.match_popup_opening = False
@@ -765,6 +813,31 @@ class WorldCupFloatApp:
         except Exception:
             return {}
 
+    def _load_name_localization_cache(self) -> dict[str, dict[str, str]]:
+        try:
+            data = json.loads(
+                self.name_cache_path.read_text(encoding="utf-8")
+            )
+            return {
+                "teams": dict(data.get("teams") or {}),
+                "players": dict(data.get("players") or {}),
+            }
+        except Exception:
+            return {"teams": {}, "players": {}}
+
+    def _save_name_localization_cache(self) -> None:
+        try:
+            self.name_cache_path.write_text(
+                json.dumps(
+                    self.name_localization_cache,
+                    ensure_ascii=False,
+                    indent=2,
+                ) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
     def _save_secrets(self) -> None:
         try:
             SECRETS_PATH.write_text(
@@ -780,11 +853,20 @@ class WorldCupFloatApp:
 
     def _save_config(self) -> None:
         try:
+            current_title = (
+                self.app_title_var.get().strip()
+                or str(COMPETITIONS[self.active_competition_key]["title"])
+            )
+            self.app_title_var.set(current_title)
+            self.competition_titles[self.active_competition_key] = current_title
             palette = {key: self._valid_color(self.palette_colors.get(key), PALETTE_PRESETS["codex"][key]) for key in PALETTE_KEYS}
             CONFIG_PATH.write_text(
                 json.dumps(
                     {
-                        "title": self.app_title_var.get().strip() or DEFAULT_APP_TITLE,
+                        "title": current_title,
+                        "active_competition": self.active_competition_key,
+                        "competition_titles": self.competition_titles,
+                        "favorite_teams": self.favorite_teams,
                         "theme_color": self._valid_color(self.theme_color_var.get(), ACCENT),
                         "icon_choice": self._valid_icon_choice(self.icon_choice_var.get()),
                         "palette": self._valid_palette_name(self.palette_var.get()),
@@ -824,10 +906,26 @@ class WorldCupFloatApp:
             self.api_help_popup.destroy()
         self.api_help_popup = None
 
+    def _close_competition_popup(self) -> None:
+        if (
+            self.competition_popup is not None
+            and self.competition_popup.winfo_exists()
+        ):
+            self.competition_popup.destroy()
+        self.competition_popup = None
+
     def _close_player_popup(self) -> None:
         if self.player_popup is not None and self.player_popup.winfo_exists():
             self.player_popup.destroy()
         self.player_popup = None
+        self.player_popup_body = None
+        self.player_popup_player_id = ""
+
+    def _close_club_popup(self) -> None:
+        if self.club_popup is not None and self.club_popup.winfo_exists():
+            self.club_popup.destroy()
+        self.club_popup = None
+        self.club_popup_body = None
 
     def _valid_color(self, value: str | None, fallback: str = ACCENT) -> str:
         value = str(value or "").strip()
@@ -903,8 +1001,10 @@ class WorldCupFloatApp:
         self._apply_fonts_to_tree(self.root)
         for popup in (
             self.settings_popup,
+            self.competition_popup,
             self.api_help_popup,
             self.player_popup,
+            self.club_popup,
             self.match_popup,
             self.match_notification_popup,
         ):
@@ -957,8 +1057,15 @@ class WorldCupFloatApp:
                 self._restyle_widget_tree(self.match_notification_popup, old, clean)
             if self.api_help_popup is not None and self.api_help_popup.winfo_exists():
                 self._restyle_widget_tree(self.api_help_popup, old, clean)
+            if (
+                self.competition_popup is not None
+                and self.competition_popup.winfo_exists()
+            ):
+                self._restyle_widget_tree(self.competition_popup, old, clean)
             if self.player_popup is not None and self.player_popup.winfo_exists():
                 self._restyle_widget_tree(self.player_popup, old, clean)
+            if self.club_popup is not None and self.club_popup.winfo_exists():
+                self._restyle_widget_tree(self.club_popup, old, clean)
             self._configure_fonts()
             self._invalidate_render_cache()
             self.render_active()
@@ -1013,6 +1120,7 @@ class WorldCupFloatApp:
     def _apply_title(self) -> None:
         title = self.app_title_var.get().strip() or DEFAULT_APP_TITLE
         self.app_title_var.set(title)
+        self.competition_titles[self.active_competition_key] = title
         self.root.title(title)
         if self.tray_icon is not None:
             try:
@@ -1842,9 +1950,24 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             fg=TEXT,
             font=("Microsoft YaHei UI", 17, "bold"),
         )
-        title_label.pack(anchor="w")
+        title_label.pack(side="left", anchor="w", fill="x", expand=True)
+        competition_button = tk.Label(
+            title_box,
+            text="▾",
+            bg=BG,
+            fg=ACCENT,
+            cursor="hand2",
+            padx=5,
+            pady=1,
+            font=("Microsoft YaHei UI", 10, "bold"),
+        )
+        competition_button.pack(side="right", anchor="n", pady=(4, 0))
+        self._bind_click(
+            competition_button,
+            lambda _event: self._open_competition_popup(),
+        )
         self.title_label = title_label
-        self._bind_wrap(title_label, reserve=12, minimum=120, maximum=260)
+        self._bind_wrap(title_label, reserve=34, minimum=120, maximum=260)
         status_label = tk.Label(
             title_box,
             textvariable=self.status_var,
@@ -1857,7 +1980,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._bind_wrap(status_label, reserve=12, minimum=120, maximum=260)
         self._apply_status_visibility()
         self._apply_quick_refresh_visibility()
-        for widget in (header, title_box, title_label, status_label):
+        for widget in (header, title_label, status_label):
             self._bind_drag(widget)
 
         controls = tk.Frame(self.root, bg=BG)
@@ -1907,11 +2030,165 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.tabs[key] = frame
             if key == self.active_tab:
                 frame.pack(fill="both", expand=True)
+        self._update_tab_visibility()
 
         grip = tk.Frame(self.root, bg=BG, cursor="size_nw_se", width=18, height=18)
         grip.place(relx=1.0, rely=1.0, anchor="se")
         grip.bind("<ButtonPress-1>", self._start_resize)
         grip.bind("<B1-Motion>", self._resize_window)
+
+    def _visible_tab_keys(self) -> list[str]:
+        return [
+            key
+            for key in self.tab_button_order
+            if not (
+                key == "bracket"
+                and self.active_competition_key != "worldcup"
+            )
+        ]
+
+    def _update_tab_visibility(self) -> None:
+        visible = set(self._visible_tab_keys())
+        for key, button in self.tab_buttons.items():
+            if key not in visible:
+                button.grid_remove()
+        if self.active_tab not in visible:
+            self.active_tab = "live"
+        for key, frame in self.tabs.items():
+            if key == self.active_tab:
+                if not frame.winfo_manager():
+                    frame.pack(fill="both", expand=True)
+            elif frame.winfo_manager():
+                frame.pack_forget()
+        for key, button in self.tab_buttons.items():
+            active = key == self.active_tab
+            button.configure(
+                bg=PANEL if active else BG,
+                fg=ACCENT if active else MUTED,
+            )
+        self._layout_tab_buttons()
+
+    def _open_competition_popup(self) -> None:
+        if (
+            self.competition_popup is not None
+            and self.competition_popup.winfo_exists()
+        ):
+            self._close_competition_popup()
+            return
+        popup = tk.Toplevel(self.root)
+        self.competition_popup = popup
+        popup.overrideredirect(True)
+        popup.configure(bg=LINE)
+        popup.attributes("-topmost", True)
+        popup.attributes("-alpha", 0.98)
+        width = min(230, max(190, self.root.winfo_width() - 40))
+        height = 6 * 40 + 48
+        x = min(
+            self.root.winfo_x() + self.root.winfo_width() - width - 12,
+            self.root.winfo_screenwidth() - width - 8,
+        )
+        y = min(
+            self.root.winfo_y() + 48,
+            self.root.winfo_screenheight() - height - 48,
+        )
+        popup.geometry(f"{width}x{height}+{max(8, x)}+{max(8, y)}")
+        shell = tk.Frame(
+            popup,
+            bg=PANEL,
+            padx=6,
+            pady=6,
+            highlightthickness=1,
+            highlightbackground=LINE,
+        )
+        shell.pack(fill="both", expand=True, padx=1, pady=1)
+        header = tk.Frame(shell, bg=PANEL, padx=8, pady=5)
+        header.pack(fill="x")
+        title = tk.Label(
+            header,
+            text="切换赛事",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        title.pack(side="left")
+        close = tk.Label(
+            header,
+            text="×",
+            bg=PANEL,
+            fg=MUTED,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        )
+        close.pack(side="right")
+        self._bind_click(
+            close,
+            lambda _event: self._close_competition_popup(),
+        )
+        for key, data in COMPETITIONS.items():
+            active = key == self.active_competition_key
+            row = tk.Label(
+                shell,
+                text=str(data["name"]),
+                bg=PANEL_3 if active else PANEL,
+                fg=ACCENT if active else TEXT,
+                anchor="w",
+                cursor="hand2",
+                padx=10,
+                pady=8,
+                font=("Microsoft YaHei UI", 9, "bold" if active else "normal"),
+            )
+            row.pack(fill="x", pady=1)
+            self._bind_click(
+                row,
+                lambda _event, current=key:
+                self._switch_competition(current),
+            )
+        self._apply_fonts_to_tree(popup)
+
+    def _switch_competition(self, competition_key: str) -> None:
+        if competition_key not in COMPETITIONS:
+            return
+        self._close_competition_popup()
+        if competition_key == self.active_competition_key:
+            return
+        self.competition_titles[self.active_competition_key] = (
+            self.app_title_var.get().strip()
+            or str(COMPETITIONS[self.active_competition_key]["title"])
+        )
+        self.active_competition_key = competition_key
+        self.provider.set_competition(competition_key)
+        self.app_title_var.set(self.competition_titles[competition_key])
+        self.root.title(self.app_title_var.get())
+        if self.tray_icon is not None:
+            try:
+                self.tray_icon.title = self.app_title_var.get()
+            except Exception:
+                pass
+        self.selected_team_id = self.favorite_teams.get(competition_key, "")
+        self.selected_player_id = ""
+        self.team_var.set("全部球队")
+        self.round_selection = {
+            "upcoming": "current",
+            "results": "current",
+        }
+        self._close_all_popups()
+        self._update_tab_visibility()
+        self._invalidate_render_cache()
+        cached = self.snapshot_cache.get(competition_key)
+        if cached is not None:
+            self.provider.teams = cached.teams
+            self.provider.matches = cached.matches
+            self.provider.standings = cached.standings
+            self.provider.leaderboards = cached.leaderboards
+            self.provider.last_snapshot = cached
+            self.provider.season_year = cached.season_year
+            self.provider.season_name = cached.season_name
+            self._apply_snapshot(cached, quiet=True)
+        else:
+            self.snapshot = None
+            self.render_active()
+        self._save_config()
+        self.refresh_data(force=False, quiet=cached is not None)
 
     def _configure_fonts(self) -> None:
         style = ttk.Style()
@@ -1983,13 +2260,20 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if width <= 1:
             self.root.after(50, self._layout_tab_buttons)
             return
-        columns = len(self.tab_button_order)
-        for index, key in enumerate(self.tab_button_order):
+        visible_keys = self._visible_tab_keys()
+        columns = len(visible_keys)
+        for key in self.tab_button_order:
+            if key not in visible_keys:
+                self.tab_buttons[key].grid_remove()
+        for index, key in enumerate(visible_keys):
             button = self.tab_buttons[key]
             button.grid(row=0, column=index, sticky="ew", padx=(0, 3), pady=(0, 4))
             button.configure(wraplength=max(26, min(48, width // columns - 6)))
         for column in range(len(self.tab_button_order)):
-            self.tab_bar.columnconfigure(column, weight=1)
+            self.tab_bar.columnconfigure(
+                column,
+                weight=1 if column < columns else 0,
+            )
 
     def _layout_data_board_buttons(self, event: tk.Event | None = None) -> None:
         if not self.data_board_button_order:
@@ -2031,8 +2315,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         result: list[tk.Toplevel] = []
         for popup in (
             self.settings_popup,
+            self.competition_popup,
             self.api_help_popup,
             self.player_popup,
+            self.club_popup,
             self.match_popup,
             self.match_notification_popup,
         ):
@@ -2047,10 +2333,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         for popup in popups:
             if popup is self.settings_popup:
                 self._close_settings()
+            elif popup is self.competition_popup:
+                self._close_competition_popup()
             elif popup is self.api_help_popup:
                 self._close_api_help()
             elif popup is self.player_popup:
                 self._close_player_popup()
+            elif popup is self.club_popup:
+                self._close_club_popup()
             elif popup is self.match_popup:
                 self._close_match_popup(popup)
             elif popup is self.match_notification_popup:
@@ -2150,6 +2440,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 self.api_help_popup.destroy()
             if self.player_popup is not None:
                 self.player_popup.destroy()
+            if self.club_popup is not None:
+                self.club_popup.destroy()
+            if self.competition_popup is not None:
+                self.competition_popup.destroy()
         except Exception:
             pass
         self.root.destroy()
@@ -2230,7 +2524,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         body_scroll.pack(fill="both", expand=True, padx=12, pady=(0, 10))
         body = tk.Frame(body_scroll.body, bg=PANEL, padx=0, pady=8)
         body.pack(fill="both", expand=True)
-        tk.Label(body, text="顶部标题", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+        competition_name = str(
+            COMPETITIONS[self.active_competition_key]["name"]
+        )
+        tk.Label(
+            body,
+            text=f"顶部标题 · {competition_name}",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(anchor="w")
         title_row = tk.Frame(body, bg=PANEL)
         title_row.pack(fill="x", pady=(3, 10))
         title_entry = tk.Entry(
@@ -2623,14 +2926,31 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
     def refresh_data(self, force: bool = False, quiet: bool = True) -> None:
         if not self.refresh_lock.acquire(blocking=False):
+            self.root.after(
+                250,
+                lambda: self.refresh_data(force=force, quiet=quiet),
+            )
             return
         if not quiet and self.snapshot is None:
             self._set_status_text("正在加载赛事数据...")
 
+        competition_key = self.active_competition_key
+        provider = DataProvider(
+            cache_dir=self.provider.cache_dir,
+            competition_key=competition_key,
+        )
+
         def worker() -> None:
             try:
-                snapshot = self.provider.load_all(force=force)
-                self._post_ui(lambda current=snapshot: self._apply_snapshot(current, quiet=quiet))
+                snapshot = provider.load_all(force=force)
+                self._post_ui(
+                    lambda current=snapshot, current_provider=provider:
+                    self._apply_loaded_snapshot(
+                        current,
+                        current_provider,
+                        quiet,
+                    )
+                )
             except Exception as exc:
                 if not quiet or self.snapshot is None:
                     self._post_ui(lambda error=exc: self._set_status_text(f"同步失败: {error}"))
@@ -2638,6 +2958,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 self.refresh_lock.release()
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_loaded_snapshot(
+        self,
+        snapshot: Snapshot,
+        provider: DataProvider,
+        quiet: bool,
+    ) -> None:
+        self.snapshot_cache[snapshot.competition_key] = snapshot
+        if snapshot.competition_key != self.active_competition_key:
+            return
+        self.provider = provider
+        self._apply_snapshot(snapshot, quiet=quiet)
 
     def _auto_refresh(self) -> None:
         self.refresh_data(force=False, quiet=True)
@@ -2679,13 +3011,31 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             for tab in self.tab_rendered_signatures
         } if had_snapshot else {}
         self.snapshot = snapshot
+        self.snapshot_cache[snapshot.competition_key] = snapshot
+        self.app_title_var.set(
+            self.competition_titles[snapshot.competition_key]
+        )
         options = ["全部球队"]
         self.team_options = {"全部球队": ""}
-        for team in sorted(snapshot.teams.values(), key=lambda t: (t.group or "Z", t.name)):
+        favorite_id = self.favorite_teams.get(snapshot.competition_key, "")
+        teams = sorted(
+            snapshot.teams.values(),
+            key=lambda team: (
+                0 if team.id == favorite_id else 1,
+                team.group or "Z",
+                team.name,
+            ),
+        )
+        for team in teams:
             option = self._team_option_text(team)
             options.append(option)
             self.team_options[option] = team.id
         self.team_combo.configure(values=options)
+        if (
+            self.selected_team_id
+            and self.selected_team_id not in snapshot.teams
+        ):
+            self.selected_team_id = ""
         if self.selected_team_id:
             selected = self._option_for_team(self.selected_team_id)
             if selected:
@@ -2693,7 +3043,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         errors = f"；{len(snapshot.errors)} 个源使用缓存/降级" if snapshot.errors else ""
         source_text = " / ".join(snapshot.sources[:3]) if snapshot.sources else "缓存"
         if not quiet or not had_snapshot:
-            self._set_status_text(f"已同步 {len(snapshot.matches)} 场比赛，{len(snapshot.teams)} 支球队 · {source_text}{errors}")
+            season = f" · {snapshot.season_name}" if snapshot.season_name else ""
+            self._set_status_text(f"已同步 {len(snapshot.matches)} 场比赛，{len(snapshot.teams)} 支球队{season} · {source_text}{errors}")
         for tab, old_signature in old_signatures.items():
             if old_signature != self._active_signature(snapshot, tab=tab):
                 self.tab_rendered_signatures.pop(tab, None)
@@ -2704,6 +3055,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self._update_visible_text()
         self._maybe_show_match_notification(snapshot)
         self.images.prefetch(self._all_logo_urls(snapshot))
+        self._request_name_localization(
+            "team",
+            [
+                team.name
+                for team in snapshot.teams.values()
+                if self.localizer.team(team.name, team.abbreviation) == team.name
+            ],
+        )
         self._refresh_live_commentary(snapshot)
         self._schedule_recent_ai_prewarm(snapshot)
         current_live_ids = {match.id for match in snapshot.matches if match.is_live}
@@ -2727,34 +3086,43 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         snapshot = snapshot or self.snapshot
         tab = tab or self.active_tab
         if snapshot is None:
-            return ("empty", tab, self.selected_team_id)
+            return (
+                "empty",
+                self.active_competition_key,
+                tab,
+                self.selected_team_id,
+            )
+        prefix = (snapshot.competition_key,)
         matches = self._filtered_matches(snapshot)
         if tab == "live":
             mode, _title, spotlight = self._spotlight_matches(snapshot)
-            return ("spotlight", mode, self.selected_team_id, tuple((m.id, m.status_state, m.home.score, m.away.score) for m in spotlight))
+            return prefix + ("spotlight", mode, self.selected_team_id, tuple((m.id, m.status_state, m.home.score, m.away.score) for m in spotlight))
         if tab == "upcoming":
-            return ("upcoming", self.selected_team_id, tuple((m.id, m.status_state) for m in [m for m in matches if m.is_upcoming][:40]))
+            return prefix + ("upcoming", self.round_selection.get("upcoming"), self.selected_team_id, tuple((m.id, m.status_state) for m in matches if m.is_upcoming))
         if tab == "results":
             completed = [m for m in matches if m.completed]
             completed.sort(key=lambda m: m.date or MIN_DATE, reverse=True)
-            return ("results", self.selected_team_id, tuple((m.id, m.home.score, m.away.score) for m in completed))
+            return prefix + ("results", self.round_selection.get("results"), self.selected_team_id, tuple((m.id, m.home.score, m.away.score) for m in completed))
         if tab == "bracket":
             knockout = [m for m in snapshot.matches if m.round_slug != "group-stage"]
-            if self.selected_team_id:
+            if (
+                self.selected_team_id
+                and snapshot.competition_kind != "league"
+            ):
                 knockout = [m for m in knockout if m.home.id == self.selected_team_id or m.away.id == self.selected_team_id]
-            return ("bracket", self.selected_team_id, tuple((m.id, m.status_state, m.home.score, m.away.score) for m in knockout))
+            return prefix + ("bracket", self.selected_team_id, tuple((m.id, m.status_state, m.home.score, m.away.score) for m in knockout))
         if tab == "standings":
             groups = snapshot.standings
             if self.selected_team_id:
                 team = snapshot.teams.get(self.selected_team_id)
                 groups = [g for g in groups if g.get("name") == (team.group if team else "")]
-            return (
+            return prefix + (
                 "standings",
                 self.selected_team_id,
                 tuple((g.get("name"), tuple((row["team"].id, tuple(sorted(row.get("stats", {}).items()))) for row in g.get("entries", []))) for g in groups),
             )
         if tab == "data":
-            return (
+            return prefix + (
                 "data",
                 self.active_data_board_key,
                 tuple((board.key, tuple((row.player_id, row.display_value) for row in board.rows[:12])) for board in self._data_boards(snapshot)),
@@ -2766,8 +3134,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 len(self.rosters.get(self.selected_team_id, []))
             )
             team_matches = [(m.id, m.status_state, m.home.score, m.away.score) for m in snapshot.matches if m.home.id == self.selected_team_id or m.away.id == self.selected_team_id]
-            return ("team", self.selected_team_id, roster_state, tuple(team_matches))
-        return (tab, self.selected_team_id)
+            return prefix + ("team", self.selected_team_id, roster_state, tuple(team_matches))
+        return prefix + (tab, self.selected_team_id)
 
     def _update_visible_text(self) -> None:
         if not self.snapshot:
@@ -3345,19 +3713,66 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         frame.clear()
         self._section(frame.body, "即将进行的比赛", "按开赛时间排序")
         self._team_filter_bar(frame.body)
-        matches = [m for m in self._filtered_matches() if m.is_upcoming]
+        rounds = self._round_groups()
+        selected_slug = self._selected_round_slug("upcoming", rounds)
+        self._round_navigator(
+            frame.body,
+            "upcoming",
+            rounds,
+            selected_slug,
+            allow_all=False,
+        )
+        selected_ids = {
+            match.id
+            for slug, _label, rows in rounds
+            if slug == selected_slug
+            for match in rows
+        }
+        matches = [
+            match for match in self._filtered_matches()
+            if match.is_upcoming
+            and (not selected_slug or match.id in selected_ids)
+        ]
         if not matches:
-            self._empty(frame.body, "没有找到即将进行的比赛。")
+            self._empty(
+                frame.body,
+                "本轮暂无未开始比赛，可使用左右按钮切换轮次。",
+            )
             return
-        for match in matches[:40]:
+        matches.sort(key=lambda match: match.date or MAX_DATE)
+        for match in matches:
             self._match_card(frame.body, match)
 
     def render_results(self) -> None:
         frame = self.tabs["results"]
         frame.clear()
-        self._section(frame.body, "已完赛赛果", "点击队徽可查看国家队资料和球员")
+        self._section(frame.body, "已完赛赛果", "点击队徽或队名可查看球队资料")
         self._team_filter_bar(frame.body)
-        matches = [m for m in self._filtered_matches() if m.completed]
+        rounds = self._round_groups()
+        selected_slug = self._selected_round_slug("results", rounds)
+        self._round_navigator(
+            frame.body,
+            "results",
+            rounds,
+            selected_slug,
+            allow_all=True,
+        )
+        show_all = self.round_selection.get("results") == "all"
+        selected_ids = {
+            match.id
+            for slug, _label, rows in rounds
+            if slug == selected_slug
+            for match in rows
+        }
+        matches = [
+            match for match in self._filtered_matches()
+            if match.completed
+            and (
+                show_all
+                or not selected_slug
+                or match.id in selected_ids
+            )
+        ]
         matches.sort(key=lambda m: m.date or MIN_DATE, reverse=True)
         if not matches:
             self._empty(frame.body, "还没有已完赛结果。")
@@ -3365,13 +3780,232 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         for match in matches:
             self._match_card(frame.body, match)
 
+    def _round_groups(
+        self,
+        snapshot: Snapshot | None = None,
+    ) -> list[tuple[str, str, list[Match]]]:
+        snapshot = snapshot or self.snapshot
+        if snapshot is None:
+            return []
+        order: list[str] = []
+        groups: dict[str, list[Match]] = {}
+        labels: dict[str, str] = {}
+        for match in sorted(
+            snapshot.matches,
+            key=lambda item: (
+                item.date or MAX_DATE,
+                item.id,
+            ),
+        ):
+            slug = match.round_slug or "round"
+            if slug not in groups:
+                groups[slug] = []
+                order.append(slug)
+                labels[slug] = match.round_name or "比赛轮次"
+            groups[slug].append(match)
+        if snapshot.competition_kind == "tournament":
+            knockout_order = [
+                "group-stage",
+                "round-of-32",
+                "round-of-16",
+                "quarterfinals",
+                "semifinals",
+                "third-place",
+                "final",
+            ]
+            group_rounds = sorted(
+                (
+                    slug for slug in order
+                    if slug == "group-stage"
+                ),
+                key=lambda _slug: 0,
+            )
+            expanded: list[tuple[str, str, list[Match]]] = []
+            if group_rounds:
+                group_matches = groups["group-stage"]
+                for number in sorted({
+                    match.round_number
+                    for match in group_matches
+                    if match.round_number
+                }):
+                    slug = f"group-stage-{number}"
+                    rows = [
+                        match for match in group_matches
+                        if match.round_number == number
+                    ]
+                    expanded.append(
+                        (slug, f"小组赛第 {number} 轮", rows)
+                    )
+            for slug in knockout_order[1:]:
+                if slug in groups:
+                    expanded.append((slug, labels[slug], groups[slug]))
+            return expanded
+        return [
+            (slug, labels[slug], groups[slug])
+            for slug in sorted(
+                order,
+                key=lambda current: min(
+                    (
+                        match.round_number or 10**6
+                        for match in groups[current]
+                    ),
+                    default=10**6,
+                ),
+            )
+        ]
+
+    def _current_round_slug(
+        self,
+        rounds: list[tuple[str, str, list[Match]]],
+    ) -> str:
+        for slug, _label, matches in rounds:
+            if any(match.is_live for match in matches):
+                return slug
+        for slug, _label, matches in rounds:
+            if any(match.is_upcoming for match in matches):
+                return slug
+        for slug, _label, matches in reversed(rounds):
+            if any(match.completed for match in matches):
+                return slug
+        return rounds[0][0] if rounds else ""
+
+    def _selected_round_slug(
+        self,
+        tab: str,
+        rounds: list[tuple[str, str, list[Match]]],
+    ) -> str:
+        selection = self.round_selection.get(tab, "current")
+        if selection == "all":
+            return ""
+        available = {slug for slug, _label, _matches in rounds}
+        if selection in available:
+            return selection
+        return self._current_round_slug(rounds)
+
+    def _round_navigator(
+        self,
+        parent: tk.Widget,
+        tab: str,
+        rounds: list[tuple[str, str, list[Match]]],
+        selected_slug: str,
+        allow_all: bool,
+    ) -> None:
+        if not rounds:
+            return
+        bar = tk.Frame(
+            parent,
+            bg=PANEL_2,
+            padx=6,
+            pady=5,
+            highlightthickness=1,
+            highlightbackground=LINE,
+        )
+        bar.pack(fill="x", pady=(0, 8))
+        self._icon_text_button(
+            bar,
+            "◀",
+            lambda: self._shift_round(tab, -1),
+        ).pack(side="left")
+        label = next(
+            (
+                current_label
+                for slug, current_label, _matches in rounds
+                if slug == selected_slug
+            ),
+            "全部赛果" if self.round_selection.get(tab) == "all" else "当前轮次",
+        )
+        center = tk.Label(
+            bar,
+            text=label,
+            bg=PANEL_2,
+            fg=TEXT,
+            anchor="center",
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        center.pack(side="left", fill="x", expand=True, padx=6)
+        self._bind_wrap(center, reserve=118 if allow_all else 72, minimum=90, maximum=230)
+        self._icon_text_button(
+            bar,
+            "▶",
+            lambda: self._shift_round(tab, 1),
+        ).pack(side="right")
+        if allow_all:
+            all_button = tk.Label(
+                bar,
+                text="全部",
+                bg=PANEL_3 if self.round_selection.get(tab) == "all" else PANEL_2,
+                fg=ACCENT if self.round_selection.get(tab) == "all" else MUTED,
+                cursor="hand2",
+                padx=6,
+                pady=4,
+                font=("Microsoft YaHei UI", 8, "bold"),
+            )
+            all_button.pack(side="right", padx=(5, 0))
+            self._bind_click(
+                all_button,
+                lambda _event: self._toggle_all_rounds(tab),
+            )
+
+    def _icon_text_button(
+        self,
+        parent: tk.Widget,
+        text: str,
+        command,
+    ) -> tk.Label:
+        button = tk.Label(
+            parent,
+            text=text,
+            bg=PANEL_2,
+            fg=ACCENT,
+            cursor="hand2",
+            padx=6,
+            pady=4,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        )
+        self._bind_click(button, lambda _event: command())
+        return button
+
+    def _shift_round(self, tab: str, direction: int) -> None:
+        rounds = self._round_groups()
+        if not rounds:
+            return
+        current = self._selected_round_slug(tab, rounds)
+        slugs = [slug for slug, _label, _matches in rounds]
+        try:
+            index = slugs.index(current)
+        except ValueError:
+            index = 0
+        index = max(0, min(len(slugs) - 1, index + direction))
+        self.round_selection[tab] = slugs[index]
+        self._invalidate_render_cache(tab)
+        if self.active_tab == tab:
+            self.render_active()
+
+    def _toggle_all_rounds(self, tab: str) -> None:
+        self.round_selection[tab] = (
+            "current"
+            if self.round_selection.get(tab) == "all"
+            else "all"
+        )
+        self._invalidate_render_cache(tab)
+        if self.active_tab == tab:
+            self.render_active()
+
     def render_standings(self) -> None:
         frame = self.tabs["standings"]
         frame.clear()
-        self._section(frame.body, "小组积分", "胜平负、进失球、净胜球与积分")
+        is_league = bool(
+            self.snapshot
+            and self.snapshot.competition_kind == "league"
+        )
+        self._section(
+            frame.body,
+            "联赛积分" if is_league else "小组积分",
+            "胜平负、进失球、净胜球与积分",
+        )
         self._team_filter_bar(frame.body)
         groups = self.snapshot.standings if self.snapshot else []
-        if self.selected_team_id:
+        if self.selected_team_id and not is_league:
             team = self.snapshot.teams.get(self.selected_team_id)
             groups = [g for g in groups if g.get("name") == (team.group if team else "")]
         if not groups:
@@ -3383,6 +4017,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def render_bracket(self) -> None:
         frame = self.tabs["bracket"]
         frame.clear()
+        if self.snapshot and self.snapshot.competition_kind == "league":
+            self._empty(frame.body, "联赛没有淘汰赛阶段。")
+            return
         self._section(frame.body, "淘汰赛对阵图", "未出结果的位置会显示组别排名或待定")
         self._team_filter_bar(frame.body)
         order = ["round-of-32", "round-of-16", "quarterfinals", "semifinals", "third-place", "final"]
@@ -3403,7 +4040,15 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def render_data(self) -> None:
         frame = self.tabs["data"]
         frame.clear()
-        self._section(frame.body, "数据面板", "射手、助攻、参与进球与球队表现")
+        is_league = bool(
+            self.snapshot
+            and self.snapshot.competition_kind == "league"
+        )
+        self._section(
+            frame.body,
+            "联赛数据中心" if is_league else "数据面板",
+            "射手、助攻、参与进球、球队表现与积分数据",
+        )
         boards = self._data_boards()
         if not boards:
             self._empty(frame.body, "球员榜单暂时不可用。")
@@ -3490,6 +4135,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 team_rows.append((team.id, "teamGoals", stats.get("进", "0")))
                 team_rows.append((team.id, "teamGoalDifference", stats.get("净", "0")))
                 team_rows.append((team.id, "teamPoints", stats.get("分", "0")))
+                team_rows.append((team.id, "teamWins", stats.get("胜", "0")))
+                team_rows.append((team.id, "teamDefense", stats.get("失", "0")))
+                team_rows.append((team.id, "teamPlayed", stats.get("赛", "0")))
 
         def team_board(key: str, label: str, suffix: str) -> Leaderboard:
             rows = []
@@ -3519,6 +4167,19 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         boards.append(team_board("teamGoals", "Team Goals", "球"))
         boards.append(team_board("teamGoalDifference", "Goal Difference", ""))
         boards.append(team_board("teamPoints", "Team Points", "分"))
+        if snapshot.competition_kind == "league":
+            boards.append(team_board("teamWins", "Team Wins", "胜"))
+            defense = team_board("teamDefense", "Best Defense", "失")
+            defense.rows.sort(
+                key=lambda row: (
+                    self._stat_int(row.stats, "value"),
+                    row.team_name,
+                )
+            )
+            for index, row in enumerate(defense.rows, start=1):
+                row.rank = index
+            boards.append(defense)
+            boards.append(team_board("teamPlayed", "Matches Played", "场"))
         return [board for board in boards if board.rows]
 
     def _stat_int(self, stats: dict[str, str], key: str) -> int:
@@ -3534,17 +4195,98 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self._empty(frame.body, "正在加载球队数据...")
             return
         if not self.selected_team_id:
-            self._section(frame.body, "选择国家队", "从任意队徽或顶部下拉框进入球队资料")
+            label = "选择俱乐部" if self.snapshot.competition_kind == "league" else "选择国家队"
+            self._section(frame.body, label, "设为主队后固定置顶")
             self._team_grid(frame.body)
             return
         team = self.snapshot.teams.get(self.selected_team_id)
         if not team:
-            self._empty(frame.body, "没有找到该国家队。")
+            self._empty(frame.body, "没有找到该球队。")
             return
         self._team_filter_bar(frame.body)
         self._team_header(frame.body, team)
+        if self.snapshot.competition_kind == "league":
+            self._team_performance_panel(frame.body, team)
         self._team_match_chain(frame.body, team)
         self._team_roster(frame.body, team)
+
+    def _team_performance_panel(
+        self,
+        parent: tk.Widget,
+        team: Team,
+    ) -> None:
+        matches = [
+            match for match in self.snapshot.matches
+            if match.completed
+            and team.id in {match.home.id, match.away.id}
+        ] if self.snapshot else []
+        matches.sort(key=lambda match: match.date or MIN_DATE)
+        wins = draws = losses = goals_for = goals_against = 0
+        form: list[str] = []
+        for match in matches:
+            is_home = match.home.id == team.id
+            try:
+                own = int(match.home.score if is_home else match.away.score)
+                other = int(match.away.score if is_home else match.home.score)
+            except (TypeError, ValueError):
+                continue
+            goals_for += own
+            goals_against += other
+            if own > other:
+                wins += 1
+                form.append("胜")
+            elif own == other:
+                draws += 1
+                form.append("平")
+            else:
+                losses += 1
+                form.append("负")
+        self._section(parent, "赛季概览", "联赛表现与近期状态")
+        panel = tk.Frame(
+            parent,
+            bg=PANEL_2,
+            padx=8,
+            pady=8,
+            highlightthickness=1,
+            highlightbackground=LINE,
+        )
+        panel.pack(fill="x", pady=(0, 8))
+        metrics = [
+            ("场次", str(wins + draws + losses)),
+            ("胜-平-负", f"{wins}-{draws}-{losses}"),
+            ("进失球", f"{goals_for}-{goals_against}"),
+            ("近五场", " ".join(form[-5:]) or "-"),
+        ]
+        for index, (label, value) in enumerate(metrics):
+            cell = tk.Frame(panel, bg=PANEL_2)
+            cell.grid(
+                row=index // 2,
+                column=index % 2,
+                sticky="ew",
+                padx=4,
+                pady=4,
+            )
+            tk.Label(
+                cell,
+                text=label,
+                bg=PANEL_2,
+                fg=MUTED,
+                anchor="w",
+                font=("Microsoft YaHei UI", 8),
+            ).pack(fill="x")
+            value_label = tk.Label(
+                cell,
+                text=value,
+                bg=PANEL_2,
+                fg=TEXT,
+                anchor="w",
+                justify="left",
+                font=("Microsoft YaHei UI", 11, "bold"),
+            )
+            value_label.pack(fill="x", pady=(2, 0))
+            self._bind_wrap(value_label, reserve=8, minimum=90, maximum=150)
+        panel.columnconfigure(0, weight=1)
+        panel.columnconfigure(1, weight=1)
 
     def _filtered_matches(self, snapshot: Snapshot | None = None) -> list[Match]:
         snapshot = snapshot or self.snapshot
@@ -3600,11 +4342,19 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self._bind_wrap(subtitle_label, reserve=8, minimum=120, maximum=420)
 
     def _empty(self, parent: tk.Widget, text: str) -> None:
-        box = tk.Frame(parent, bg=PANEL, padx=18, pady=18)
+        box = tk.Frame(parent, bg=PANEL, padx=14, pady=14)
         box.pack(fill="x", pady=10)
-        label = tk.Label(box, text=text, bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 11), justify="left")
+        label = tk.Label(
+            box,
+            text=text,
+            bg=PANEL,
+            fg=MUTED,
+            anchor="nw",
+            font=("Microsoft YaHei UI", 9),
+            justify="left",
+        )
         label.pack(anchor="w", fill="x")
-        self._bind_wrap(label, reserve=8, minimum=120, maximum=420)
+        self._bind_wrap(label, reserve=30, minimum=110, maximum=390)
 
     def _match_card(self, parent: tk.Widget, match: Match, live: bool = False) -> None:
         card = tk.Frame(parent, bg=PANEL, padx=12, pady=11, highlightthickness=1, highlightbackground=LINE)
@@ -4444,7 +5194,12 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _standings_group(self, parent: tk.Widget, group: dict) -> None:
         wrap = tk.Frame(parent, bg=PANEL, padx=10, pady=10, highlightthickness=1, highlightbackground=LINE)
         wrap.pack(fill="x", pady=6)
-        tk.Label(wrap, text=f"{group.get('name')} 组", bg=PANEL, fg=ACCENT, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
+        heading = (
+            str(group.get("name") or "积分榜")
+            if self.snapshot and self.snapshot.competition_kind == "league"
+            else f"{group.get('name')} 组"
+        )
+        tk.Label(wrap, text=heading, bg=PANEL, fg=ACCENT, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
         for entry in group.get("entries", []):
             team: Team = entry["team"]
             stats = entry["stats"]
@@ -4488,6 +5243,25 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self._bind_wrap(main_label, reserve=6, minimum=80, maximum=190)
             if is_team_row:
                 self._bind_team_open(main_label, row.team_id)
+            else:
+                self._bind_click(
+                    main_label,
+                    lambda _event, current=row:
+                    self._open_player_detail(
+                        Player(
+                            id=current.player_id,
+                            name=current.player_name,
+                            stats=dict(current.stats),
+                            club_team_id=current.team_id,
+                            club_team_name=current.team_name,
+                            club_competition_key=(
+                                self.active_competition_key
+                                if self.active_competition_key != "worldcup"
+                                else ""
+                            ),
+                        )
+                    ),
+                )
             team_name = row.team_abbreviation if is_team_row else self._team_text(row)
             team_label = tk.Label(name_box, text=team_name, bg=PANEL, fg=MUTED, anchor="w", justify="left", font=("Microsoft YaHei UI", 8))
             team_label.pack(fill="x")
@@ -4501,7 +5275,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _team_grid(self, parent: tk.Widget) -> None:
         grid = tk.Frame(parent, bg=BG)
         grid.pack(fill="x")
-        teams = sorted(self.snapshot.teams.values(), key=lambda t: (t.group or "Z", t.name)) if self.snapshot else []
+        favorite_id = self.favorite_teams.get(
+            self.active_competition_key,
+            "",
+        )
+        teams = sorted(
+            self.snapshot.teams.values(),
+            key=lambda team: (
+                0 if team.id == favorite_id else 1,
+                team.group or "Z",
+                team.name,
+            ),
+        ) if self.snapshot else []
         for index, team in enumerate(teams):
             cell = tk.Frame(grid, bg=PANEL, padx=8, pady=8, highlightthickness=1, highlightbackground=LINE)
             cell.pack(fill="x", pady=4)
@@ -4509,6 +5294,23 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             team_label = tk.Label(cell, text=f"{team.abbreviation}\n{self._team_text(team)}", bg=PANEL, fg=TEXT, justify="left", font=("Microsoft YaHei UI", 9, "bold"))
             team_label.pack(side="left", padx=(8, 0))
             self._bind_team_open(team_label, team.id)
+            favorite = team.id == favorite_id
+            favorite_button = tk.Label(
+                cell,
+                text="主队" if favorite else "设为主队",
+                bg=PANEL_3 if favorite else PANEL,
+                fg=ACCENT if favorite else MUTED,
+                cursor="hand2",
+                padx=7,
+                pady=4,
+                font=("Microsoft YaHei UI", 8, "bold"),
+            )
+            favorite_button.pack(side="right")
+            self._bind_click(
+                favorite_button,
+                lambda _event, tid=team.id:
+                self._set_favorite_team(tid),
+            )
             cell.configure(cursor="hand2")
             self._bind_click(cell, lambda _event, tid=team.id: self.open_team(tid))
 
@@ -4522,7 +5324,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         title_label.pack(anchor="w", fill="x")
         self._bind_wrap(title_label, reserve=4, minimum=120, maximum=260)
         standing = team.standing
-        group_text = f"{team.group} 组" if team.group else "小组待定"
+        if self.snapshot and self.snapshot.competition_kind == "league":
+            group_text = self.snapshot.competition_name
+        else:
+            group_text = f"{team.group} 组" if team.group else "小组待定"
         rank = f"第 {standing.get('rank')} 名" if standing.get("rank") else "排名待定"
         meta_label = tk.Label(info, text=f"{group_text} · {rank}", bg=PANEL, fg=ACCENT, justify="left", font=("Microsoft YaHei UI", 10, "bold"))
         meta_label.pack(anchor="w", fill="x", pady=(3, 0))
@@ -4532,6 +5337,36 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             values_label = tk.Label(info, text=values, bg=PANEL, fg=MUTED, justify="left", font=("Microsoft YaHei UI", 9))
             values_label.pack(anchor="w", fill="x", pady=(5, 0))
             self._bind_wrap(values_label, reserve=4, minimum=120, maximum=260)
+        favorite = self.favorite_teams.get(
+            self.active_competition_key,
+            "",
+        ) == team.id
+        favorite_button = tk.Label(
+            box,
+            text="主队" if favorite else "设为主队",
+            bg=PANEL_3 if favorite else PANEL_2,
+            fg=ACCENT if favorite else MUTED,
+            cursor="hand2",
+            padx=7,
+            pady=4,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        favorite_button.pack(side="right", anchor="n")
+        self._bind_click(
+            favorite_button,
+            lambda _event, tid=team.id:
+            self._set_favorite_team(tid),
+        )
+
+    def _set_favorite_team(self, team_id: str) -> None:
+        if self.favorite_teams.get(self.active_competition_key) == team_id:
+            self.favorite_teams.pop(self.active_competition_key, None)
+        else:
+            self.favorite_teams[self.active_competition_key] = team_id
+        self._save_config()
+        self._invalidate_render_cache("team")
+        if self.active_tab == "team":
+            self.render_team()
 
     def _team_match_chain(self, parent: tk.Widget, team: Team) -> None:
         matches = [m for m in self.snapshot.matches if m.home.id == team.id or m.away.id == team.id] if self.snapshot else []
@@ -4559,7 +5394,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 self.match_labels.setdefault(match.id, []).append({"when": when_label, "summary": summary_label})
 
     def _team_roster(self, parent: tk.Widget, team: Team) -> None:
-        self._section(parent, "球员名单与数据", "点击球员可查看赛事统计")
+        self._section(
+            parent,
+            "球员名单",
+            "点击球员进入详细数据页面",
+        )
         if team.id not in self.rosters and team.id not in self.loading_rosters and team.id not in self.roster_errors:
             self.loading_rosters.add(team.id)
             self._load_roster_async(team.id)
@@ -4593,20 +5432,31 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             meta_label = tk.Label(name_box, text=meta or "球员", bg=PANEL, fg=MUTED, anchor="w", justify="left", font=("Microsoft YaHei UI", 8))
             meta_label.pack(fill="x", pady=(2, 0))
             self._bind_wrap(meta_label, reserve=4, minimum=110, maximum=260)
-            stats_box = tk.Frame(card, bg=PANEL)
-            stats_box.pack(fill="x", pady=(7, 0))
-            for label, key in [("出场", "APP"), ("进球", "G"), ("助攻", "A")]:
-                value = player.stats.get(key, "-")
-                item = tk.Frame(stats_box, bg=PANEL_2, padx=7, pady=4)
-                item.pack(side="left", fill="x", expand=True, padx=(0, 5))
-                tk.Label(item, text=label if not self.use_english_var.get() else key, bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 7)).pack(anchor="w")
-                tk.Label(item, text=value or "-", bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
-            for widget in [card, top, name_box, stats_box, *card.winfo_children()]:
+            stats_box = None
+            if (
+                self.snapshot
+                and self.snapshot.competition_kind != "league"
+            ):
+                stats_box = tk.Frame(card, bg=PANEL)
+                stats_box.pack(fill="x", pady=(7, 0))
+                for label, key in [("出场", "APP"), ("进球", "G"), ("助攻", "A")]:
+                    value = player.stats.get(key, "-")
+                    item = tk.Frame(stats_box, bg=PANEL_2, padx=7, pady=4)
+                    item.pack(side="left", fill="x", expand=True, padx=(0, 5))
+                    tk.Label(item, text=label if not self.use_english_var.get() else key, bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 7)).pack(anchor="w")
+                    tk.Label(item, text=value or "-", bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
+            widgets = [card, top, name_box, *card.winfo_children()]
+            if stats_box is not None:
+                widgets.append(stats_box)
+            for widget in widgets:
                 self._bind_click(widget, lambda _event, p=player: self._open_player_detail(p))
 
     def _load_roster_async(self, team_id: str) -> None:
+        competition_key = self.active_competition_key
+        provider = self.provider
+
         def worker() -> None:
-            players, error = self.provider.get_roster(team_id)
+            players, error = provider.get_roster(team_id)
 
             def apply() -> None:
                 self.loading_rosters.discard(team_id)
@@ -4615,7 +5465,22 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 else:
                     self.rosters[team_id] = players
                     self.roster_errors.pop(team_id, None)
-                if self.active_tab == "team" and self.selected_team_id == team_id:
+                    self._request_name_localization(
+                        "player",
+                        [
+                            player.name
+                            for player in players
+                            if self.localizer.player(
+                                player.name,
+                                player.id,
+                            ) == player.name
+                        ],
+                    )
+                if (
+                    self.active_competition_key == competition_key
+                    and self.active_tab == "team"
+                    and self.selected_team_id == team_id
+                ):
                     self.render_team()
 
             self.root.after(0, apply)
@@ -4631,6 +5496,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._close_player_popup()
         popup = tk.Toplevel(self.root)
         self.player_popup = popup
+        self.player_popup_player_id = player.id
         popup.overrideredirect(True)
         popup.configure(bg=PANEL)
         popup.attributes("-topmost", True)
@@ -4656,8 +5522,332 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._bind_drag(title)
         body = ScrollFrame(popup, bg=PANEL)
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.player_popup_body = body.body
         self._player_detail(body.body, player)
         self._apply_fonts_to_tree(popup)
+
+        def worker() -> None:
+            enriched = self.provider.get_player_profile(player)
+            self._post_ui(
+                lambda current=enriched:
+                self._apply_player_profile(current)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _request_name_localization(
+        self,
+        kind: str,
+        names: list[str],
+    ) -> None:
+        key = self.agnes_api_key_var.get().strip()
+        cache_key = "players" if kind == "player" else "teams"
+        missing = [
+            name for name in dict.fromkeys(names)
+            if name
+            and name not in self.name_localization_cache[cache_key]
+            and f"{kind}:{name}" not in self.name_localization_loading
+        ]
+        if not key or not missing:
+            return
+        for name in missing:
+            self.name_localization_loading.add(f"{kind}:{name}")
+
+        def worker() -> None:
+            translated: dict[str, str] = {}
+            try:
+                for start in range(0, len(missing), 60):
+                    translated.update(
+                        self.commentary_service.localize_football_names(
+                            missing[start : start + 60],
+                            kind,
+                            key,
+                        )
+                    )
+            except Exception:
+                pass
+            self._post_ui(
+                lambda rows=translated:
+                self._apply_name_localization(kind, missing, rows)
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_name_localization(
+        self,
+        kind: str,
+        requested: list[str],
+        translated: dict[str, str],
+    ) -> None:
+        cache_key = "players" if kind == "player" else "teams"
+        self.name_localization_cache[cache_key].update(translated)
+        if kind == "player":
+            self.localizer.players.update(translated)
+        else:
+            self.localizer.teams_by_name.update(translated)
+        for name in requested:
+            self.name_localization_loading.discard(f"{kind}:{name}")
+        if translated:
+            self._save_name_localization_cache()
+            self._invalidate_render_cache()
+            if self.snapshot:
+                self.render_active()
+
+    def _clear_club_popup_reference(
+        self,
+        popup: tk.Toplevel,
+    ) -> None:
+        if self.club_popup is popup:
+            self.club_popup = None
+            self.club_popup_body = None
+
+    def _apply_player_profile(self, player: Player) -> None:
+        if (
+            self.player_popup is None
+            or not self.player_popup.winfo_exists()
+            or self.player_popup_player_id != player.id
+            or self.player_popup_body is None
+        ):
+            return
+        self._player_detail(self.player_popup_body, player)
+        self._apply_fonts_to_tree(self.player_popup)
+
+    def _open_external_club(self, player: Player) -> None:
+        if (
+            not player.club_competition_key
+            or not player.club_team_id
+        ):
+            return
+        self._close_club_popup()
+        popup = tk.Toplevel(self.root)
+        self.club_popup = popup
+        popup.overrideredirect(True)
+        popup.configure(bg=PANEL)
+        popup.attributes("-topmost", True)
+        popup.attributes("-alpha", 0.98)
+        popup.bind(
+            "<Destroy>",
+            lambda event, current=popup:
+            self._clear_club_popup_reference(current)
+            if event.widget is current else None,
+            add="+",
+        )
+        width = min(340, max(286, self.root.winfo_width() - 16))
+        height = min(500, max(380, self.root.winfo_height() - 28))
+        popup.geometry(
+            f"{width}x{height}+{self.root.winfo_x() + 8}+"
+            f"{self.root.winfo_y() + 18}"
+        )
+        header = tk.Frame(popup, bg=PANEL, padx=12, pady=10)
+        header.pack(fill="x")
+        title = tk.Label(
+            header,
+            text="俱乐部资料",
+            bg=PANEL,
+            fg=ACCENT,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        title.pack(side="left")
+        close = tk.Label(
+            header,
+            text="×",
+            bg=PANEL,
+            fg=MUTED,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        close.pack(side="right")
+        self._bind_click(close, lambda _event: self._close_club_popup())
+        self._bind_drag(header)
+        self._bind_drag(title)
+        body = ScrollFrame(popup, bg=PANEL)
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.club_popup_body = body.body
+        self._empty(body.body, "正在加载俱乐部资料…")
+
+        def worker() -> None:
+            provider = DataProvider(
+                cache_dir=self.provider.cache_dir,
+                competition_key=player.club_competition_key,
+            )
+            snapshot = provider.load_all(force=False)
+            team = snapshot.teams.get(player.club_team_id)
+            roster: list[Player] = []
+            error = ""
+            if team is not None:
+                roster, roster_error = provider.get_roster(team.id)
+                error = roster_error or ""
+            else:
+                error = "未在当前联赛赛季中找到该俱乐部。"
+            self._post_ui(
+                lambda current_snapshot=snapshot, current_team=team,
+                current_roster=roster, current_error=error:
+                self._render_external_club(
+                    current_snapshot,
+                    current_team,
+                    current_roster,
+                    current_error,
+                )
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_external_club(
+        self,
+        snapshot: Snapshot,
+        team: Team | None,
+        roster: list[Player],
+        error: str,
+    ) -> None:
+        if (
+            self.club_popup is None
+            or not self.club_popup.winfo_exists()
+            or self.club_popup_body is None
+        ):
+            return
+        parent = self.club_popup_body
+        for child in parent.winfo_children():
+            child.destroy()
+        if team is None:
+            self._empty(parent, error or "俱乐部资料暂时不可用。")
+            return
+        header = tk.Frame(
+            parent,
+            bg=PANEL,
+            padx=12,
+            pady=11,
+            highlightthickness=1,
+            highlightbackground=LINE,
+        )
+        header.pack(fill="x", pady=(0, 8))
+        self._team_icon(
+            header,
+            team.id,
+            team.logo,
+            size=44,
+            clickable=False,
+        ).pack(side="left")
+        info = tk.Frame(header, bg=PANEL)
+        info.pack(side="left", fill="x", expand=True, padx=(12, 0))
+        name = tk.Label(
+            info,
+            text=self._team_text(team),
+            bg=PANEL,
+            fg=TEXT,
+            anchor="w",
+            font=("Microsoft YaHei UI", 14, "bold"),
+        )
+        name.pack(fill="x")
+        self._bind_wrap(name, reserve=4, minimum=130, maximum=250)
+        standing = team.standing
+        meta = (
+            f"{snapshot.competition_name} · "
+            f"{snapshot.season_name or '当前赛季'}"
+        )
+        if standing.get("rank"):
+            meta += f" · 第 {standing['rank']} 名"
+        meta_label = tk.Label(
+            info,
+            text=meta,
+            bg=PANEL,
+            fg=ACCENT,
+            anchor="w",
+            justify="left",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        meta_label.pack(fill="x", pady=(3, 0))
+        self._bind_wrap(meta_label, reserve=4, minimum=130, maximum=250)
+        if standing:
+            values = "  ".join(
+                f"{key}{standing.get(key, '')}"
+                for key in ["赛", "胜", "平", "负", "进", "失", "净", "分"]
+            )
+            stats = tk.Label(
+                parent,
+                text=values,
+                bg=PANEL_2,
+                fg=TEXT,
+                anchor="w",
+                justify="left",
+                padx=9,
+                pady=7,
+                font=("Microsoft YaHei UI", 9),
+            )
+            stats.pack(fill="x", pady=(0, 8))
+            self._bind_wrap(stats, reserve=18, minimum=150, maximum=300)
+        team_matches = [
+            match for match in snapshot.matches
+            if team.id in {match.home.id, match.away.id}
+        ]
+        completed = sorted(
+            (match for match in team_matches if match.completed),
+            key=lambda match: match.date or MIN_DATE,
+            reverse=True,
+        )[:5]
+        self._section(parent, "近期赛果", "最近五场正式比赛")
+        for match in completed:
+            row = tk.Frame(parent, bg=PANEL_2, padx=9, pady=7)
+            row.pack(fill="x", pady=2)
+            text = (
+                f"{self._team_text(match.home)} "
+                f"{match.home.score or '-'} - {match.away.score or '-'} "
+                f"{self._team_text(match.away)}"
+            )
+            label = tk.Label(
+                row,
+                text=text,
+                bg=PANEL_2,
+                fg=TEXT,
+                anchor="w",
+                justify="left",
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+            label.pack(fill="x")
+            self._bind_wrap(label, reserve=4, minimum=150, maximum=300)
+        self._section(parent, "球员名单", "点击球员查看详细数据")
+        if error:
+            self._empty(parent, error)
+        for current in roster:
+            row = tk.Frame(
+                parent,
+                bg=PANEL,
+                padx=9,
+                pady=7,
+                cursor="hand2",
+                highlightthickness=1,
+                highlightbackground=LINE,
+            )
+            row.pack(fill="x", pady=2)
+            number = f"#{current.jersey}" if current.jersey else "--"
+            tk.Label(
+                row,
+                text=number,
+                bg=PANEL_2,
+                fg=ACCENT,
+                width=5,
+                font=("Microsoft YaHei UI", 8, "bold"),
+            ).pack(side="left")
+            label = tk.Label(
+                row,
+                text=(
+                    f"{self._player_text(current.name, current.id)} · "
+                    f"{self._position_text(current.position)}"
+                ),
+                bg=PANEL,
+                fg=TEXT,
+                anchor="w",
+                justify="left",
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+            label.pack(side="left", fill="x", expand=True, padx=(8, 0))
+            self._bind_wrap(label, reserve=58, minimum=130, maximum=250)
+            for widget in (row, label):
+                self._bind_click(
+                    widget,
+                    lambda _event, selected=current:
+                    self._open_player_detail(selected),
+                )
+        self._apply_fonts_to_tree(self.club_popup)
 
     def _player_detail(self, parent: tk.Widget, player: Player) -> None:
         for child in parent.winfo_children():
@@ -4674,6 +5864,31 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             physical_label = tk.Label(parent, text=physical, bg=PANEL, fg=MUTED, justify="left")
             physical_label.pack(anchor="w", fill="x", pady=(0, 10))
             self._bind_wrap(physical_label, reserve=8, minimum=140, maximum=300)
+        if player.club_team_name:
+            club_row = tk.Frame(parent, bg=PANEL_2, padx=9, pady=7)
+            club_row.pack(fill="x", pady=(0, 10))
+            tk.Label(
+                club_row,
+                text="所在俱乐部",
+                bg=PANEL_2,
+                fg=MUTED,
+                font=("Microsoft YaHei UI", 8),
+            ).pack(side="left")
+            club = tk.Label(
+                club_row,
+                text=player.club_team_name,
+                bg=PANEL_2,
+                fg=ACCENT if player.club_competition_key else TEXT,
+                cursor="hand2" if player.club_competition_key else "arrow",
+                font=("Microsoft YaHei UI", 9, "bold"),
+            )
+            club.pack(side="right")
+            if player.club_competition_key:
+                self._bind_click(
+                    club,
+                    lambda _event, current=player:
+                    self._open_external_club(current),
+                )
         tk.Label(parent, text="赛事数据", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w")
         if not player.stats:
             tk.Label(parent, text="暂无出场统计", bg=PANEL, fg=MUTED).pack(anchor="w", pady=(8, 0))

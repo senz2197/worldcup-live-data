@@ -142,6 +142,9 @@ BOARD_NAMES = {
     "teamGoals": "球队进球",
     "teamGoalDifference": "净胜球",
     "teamPoints": "积分榜",
+    "teamWins": "胜场榜",
+    "teamDefense": "防守榜",
+    "teamPlayed": "比赛场次",
 }
 
 

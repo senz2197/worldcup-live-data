@@ -1,6 +1,6 @@
-# 世界杯实时数据 / WorldCup Float
+# 世界杯与五大联赛实时数据 / WorldCup Float
 
-面向 Windows 的 2026 世界杯桌面浮动比分工具。
+面向 Windows 的世界杯与欧洲五大联赛桌面浮动比分工具。
 
 ## 下载
 
@@ -19,13 +19,16 @@ WorldCupFloat_Portable.zip
 - Bottom-right floating badge for show/hide, settings, refresh, and exit
 - System tray menu as a backup control entry
 - Drag inside the content area to scroll; no visible side scrollbar
-- Live matches with score and national team logos
-- Upcoming fixtures
-- Completed results
+- Competition switcher for the World Cup, Premier League, La Liga, Bundesliga, Serie A, and Ligue 1
+- Live matches with scores and team logos
+- Upcoming fixtures grouped by the current or next round
+- Completed results defaulting to the current round, with previous/next and all-results controls
 - Group standings with GP/W/D/L/GF/GA/GD/PTS
-- Knockout bracket placeholders, such as group winner or second place, before results are known
-- Data panel with player leaderboards
-- Team workflow: select a national team, or click any team logo, to view team data, match chain, roster, and player stats
+- League tables and World Cup knockout bracket placeholders
+- Competition-specific statistical leaderboards
+- Favorite team support for every competition
+- Team workflow: click any team logo or name to view team form, results, roster, and detailed player data
+- World Cup player profiles include their club, with direct links into supported European league club cards
 - Compact-first layout designed to fit within roughly one quarter of a desktop screen width
 - Chinese team and player names by default, with an English-name toggle in settings
 - Player details open as a secondary panel instead of a side-by-side layout
@@ -40,11 +43,11 @@ WorldCupFloat_Portable.zip
 
 ## Data Sources
 
-Default source:
+Default sources:
 
-- ESPN public FIFA World Cup endpoints for scoreboard, teams, standings, rosters, and player statistics.
+- ESPN public soccer endpoints for scoreboards, teams, standings, rosters, player profiles, and statistics.
 
-Fallback source:
+World Cup fallback source:
 
 - `worldcup26.ir`, an open-source no-key REST API, for teams, groups, and matches if ESPN is unavailable and no ESPN cache exists.
 

@@ -21,15 +21,53 @@ def app_dir() -> Path:
 APP_DIR = app_dir()
 CACHE_DIR = APP_DIR / "cache"
 
-ESPN_SCOREBOARD_URL = (
-    "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/"
-    "scoreboard?limit=500&dates=2026"
-)
-ESPN_TEAMS_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/teams"
-ESPN_STANDINGS_URL = "https://site.web.api.espn.com/apis/v2/sports/soccer/fifa.world/standings"
-ESPN_STATS_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/statistics"
-ESPN_ROSTER_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/teams/{team_id}/roster"
-ESPN_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/summary?event={match_id}"
+ESPN_SITE_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
+ESPN_WEB_BASE = "https://site.web.api.espn.com/apis/v2/sports/soccer"
+
+COMPETITIONS = {
+    "worldcup": {
+        "name": "世界杯",
+        "title": "世界杯实时数据",
+        "espn": "fifa.world",
+        "kind": "tournament",
+        "year": 2026,
+    },
+    "premier_league": {
+        "name": "英超",
+        "title": "英超实时数据",
+        "espn": "eng.1",
+        "kind": "league",
+    },
+    "laliga": {
+        "name": "西甲",
+        "title": "西甲实时数据",
+        "espn": "esp.1",
+        "kind": "league",
+    },
+    "bundesliga": {
+        "name": "德甲",
+        "title": "德甲实时数据",
+        "espn": "ger.1",
+        "kind": "league",
+    },
+    "serie_a": {
+        "name": "意甲",
+        "title": "意甲实时数据",
+        "espn": "ita.1",
+        "kind": "league",
+    },
+    "ligue_1": {
+        "name": "法甲",
+        "title": "法甲实时数据",
+        "espn": "fra.1",
+        "kind": "league",
+    },
+}
+
+ESPN_LEAGUE_TO_COMPETITION = {
+    str(data["espn"]): key
+    for key, data in COMPETITIONS.items()
+}
 
 WORLDCUP26_GAMES_URL = "https://worldcup26.ir/get/games"
 WORLDCUP26_TEAMS_URL = "https://worldcup26.ir/get/teams"
@@ -48,6 +86,10 @@ ROUND_LABELS = {
     "semifinals": "半决赛",
     "third-place": "季军赛",
     "final": "决赛",
+}
+
+ROUND_SLUG_ALIASES = {
+    "third-place-match": "third-place",
 }
 
 STAT_NAMES = {
@@ -106,6 +148,8 @@ class Match:
     events: list[dict[str, Any]] = field(default_factory=list)
     commentary: list["CommentaryEntry"] = field(default_factory=list)
     source: str = "espn"
+    round_number: int = 0
+    competition_key: str = "worldcup"
 
     @property
     def is_live(self) -> bool:
@@ -130,6 +174,9 @@ class Player:
     citizenship: str = ""
     headshot: str = ""
     stats: dict[str, str] = field(default_factory=dict)
+    club_team_id: str = ""
+    club_team_name: str = ""
+    club_competition_key: str = ""
 
 
 @dataclass
@@ -168,6 +215,11 @@ class Snapshot:
     leaderboards: list[Leaderboard]
     errors: list[str] = field(default_factory=list)
     sources: list[str] = field(default_factory=list)
+    competition_key: str = "worldcup"
+    competition_name: str = "世界杯"
+    competition_kind: str = "tournament"
+    season_year: int = 2026
+    season_name: str = ""
 
 
 def parse_datetime(value: str | None) -> datetime | None:
@@ -229,7 +281,11 @@ def safe_filename(value: str) -> str:
 
 
 class DataProvider:
-    def __init__(self, cache_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        cache_dir: Path | None = None,
+        competition_key: str = "worldcup",
+    ) -> None:
         self.cache_dir = cache_dir or CACHE_DIR
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         (self.cache_dir / "images").mkdir(parents=True, exist_ok=True)
@@ -238,6 +294,37 @@ class DataProvider:
         self.standings: list[dict[str, Any]] = []
         self.leaderboards: list[Leaderboard] = []
         self.last_snapshot: Snapshot | None = None
+        self.competition_key = "worldcup"
+        self.competition = COMPETITIONS["worldcup"]
+        self.season_year = int(self.competition.get("year") or datetime.now().year)
+        self.season_name = ""
+        self.set_competition(competition_key)
+
+    def set_competition(self, competition_key: str) -> None:
+        key = competition_key if competition_key in COMPETITIONS else "worldcup"
+        self.competition_key = key
+        self.competition = COMPETITIONS[key]
+        self.season_year = int(
+            self.competition.get("year") or datetime.now().year
+        )
+        self.season_name = ""
+
+    @property
+    def espn_league(self) -> str:
+        return str(self.competition["espn"])
+
+    @property
+    def is_league(self) -> bool:
+        return self.competition.get("kind") == "league"
+
+    def _cache_name(self, suffix: str) -> str:
+        return f"espn_{safe_filename(self.competition_key)}_{suffix}.json"
+
+    def _site_url(self, endpoint: str) -> str:
+        return f"{ESPN_SITE_BASE}/{self.espn_league}/{endpoint}"
+
+    def _web_url(self, endpoint: str) -> str:
+        return f"{ESPN_WEB_BASE}/{self.espn_league}/{endpoint}"
 
     def load_all(self, force: bool = False) -> Snapshot:
         errors: list[str] = []
@@ -248,34 +335,60 @@ class DataProvider:
         self.leaderboards = []
 
         try:
-            teams_data = self.fetch_json(ESPN_TEAMS_URL, "espn_teams.json", ttl_seconds=12 * 3600, force=force)
+            teams_data = self.fetch_json(
+                self._site_url("teams"),
+                self._cache_name("teams"),
+                ttl_seconds=12 * 3600,
+                force=force,
+            )
             self._parse_espn_teams(teams_data)
             sources.append("ESPN teams")
         except Exception as exc:
             errors.append(f"ESPN 球队数据不可用: {exc}")
 
         try:
-            standings_data = self.fetch_json(ESPN_STANDINGS_URL, "espn_standings.json", ttl_seconds=STANDINGS_TTL_SECONDS, force=force)
+            standings_data = self.fetch_json(
+                self._web_url("standings"),
+                self._cache_name("standings"),
+                ttl_seconds=STANDINGS_TTL_SECONDS,
+                force=force,
+            )
+            season = standings_data.get("season") or {}
+            self.season_year = int(
+                season.get("year") or self.season_year
+            )
+            self.season_name = str(
+                season.get("displayName") or ""
+            )
             self.standings = self._parse_espn_standings(standings_data)
             sources.append("ESPN standings")
         except Exception as exc:
             errors.append(f"ESPN 积分榜不可用: {exc}")
 
         try:
-            scoreboard_data = self.fetch_json(ESPN_SCOREBOARD_URL, "espn_scoreboard_2026.json", ttl_seconds=SCOREBOARD_TTL_SECONDS, force=force)
+            scoreboard_data = self._load_scoreboard(force=force)
             self.matches = self._parse_espn_matches(scoreboard_data)
+            self._assign_round_numbers()
             sources.append("ESPN scoreboard")
         except Exception as exc:
             errors.append(f"ESPN 赛程比分不可用: {exc}")
 
         try:
-            stats_data = self.fetch_json(ESPN_STATS_URL, "espn_stats.json", ttl_seconds=STATS_TTL_SECONDS, force=force)
+            stats_data = self.fetch_json(
+                self._site_url("statistics"),
+                self._cache_name("stats"),
+                ttl_seconds=STATS_TTL_SECONDS,
+                force=force,
+            )
             self.leaderboards = self._parse_espn_leaderboards(stats_data)
             sources.append("ESPN statistics")
         except Exception as exc:
             errors.append(f"ESPN 球员榜单不可用: {exc}")
 
-        if not self.matches or not self.teams:
+        if (
+            self.competition_key == "worldcup"
+            and (not self.matches or not self.teams)
+        ):
             try:
                 self._load_worldcup26_fallback(force=force)
                 sources.append("worldcup26.ir fallback")
@@ -291,6 +404,11 @@ class DataProvider:
             leaderboards=self.leaderboards,
             errors=errors,
             sources=sources,
+            competition_key=self.competition_key,
+            competition_name=str(self.competition["name"]),
+            competition_kind=str(self.competition["kind"]),
+            season_year=self.season_year,
+            season_name=self.season_name,
         )
         self.last_snapshot = snapshot
         return snapshot
@@ -303,8 +421,8 @@ class DataProvider:
             return [], "当前备用数据源没有球员名单接口。"
         try:
             data = self.fetch_json(
-                ESPN_ROSTER_URL.format(team_id=team_id),
-                f"espn_roster_{safe_filename(team_id)}.json",
+                self._site_url(f"teams/{team_id}/roster"),
+                self._cache_name(f"roster_{safe_filename(team_id)}"),
                 ttl_seconds=6 * 3600,
                 force=force,
             )
@@ -324,8 +442,8 @@ class DataProvider:
         ttl = 8 if live else 365 * 24 * 3600
         try:
             data = self.fetch_json(
-                ESPN_SUMMARY_URL.format(match_id=match_id),
-                f"espn_summary_{safe_filename(match_id)}.json",
+                self._site_url(f"summary?event={match_id}"),
+                self._cache_name(f"summary_{safe_filename(match_id)}"),
                 ttl_seconds=ttl,
                 force=force,
             )
@@ -333,6 +451,91 @@ class DataProvider:
             return commentary, data, None
         except Exception as exc:
             return [], {}, f"文字直播暂时不可用: {exc}"
+
+    def get_player_profile(
+        self,
+        player: Player,
+        force: bool = False,
+    ) -> Player:
+        if not player.id:
+            return player
+        try:
+            data = self.fetch_json(
+                (
+                    "https://site.web.api.espn.com/apis/common/v3/"
+                    f"sports/soccer/athletes/{player.id}"
+                ),
+                f"espn_player_{safe_filename(player.id)}.json",
+                ttl_seconds=12 * 3600,
+                force=force,
+            )
+        except Exception:
+            return player
+        athlete = data.get("athlete") or {}
+        team = athlete.get("team") or {}
+        league = data.get("league") or {}
+        league_slug = str(league.get("slug") or "")
+        profile_stats = extract_player_stats(
+            athlete.get("statistics")
+        )
+        summary = athlete.get("statsSummary") or {}
+        if isinstance(summary, dict):
+            profile_stats.update(
+                extract_player_stats(summary.get("statistics"))
+            )
+        return Player(
+            id=player.id,
+            name=athlete.get("displayName") or player.name,
+            short_name=athlete.get("shortName") or player.short_name,
+            jersey=str(athlete.get("jersey") or player.jersey),
+            position=(
+                (athlete.get("position") or {}).get("displayName")
+                if isinstance(athlete.get("position"), dict)
+                else player.position
+            ) or player.position,
+            age=str(athlete.get("age") or player.age),
+            height=athlete.get("displayHeight") or player.height,
+            weight=athlete.get("displayWeight") or player.weight,
+            birthplace=player.birthplace,
+            citizenship=(
+                (athlete.get("citizenshipCountry") or {}).get("displayName")
+                if isinstance(athlete.get("citizenshipCountry"), dict)
+                else athlete.get("citizenship")
+            ) or player.citizenship,
+            headshot=player.headshot,
+            stats={**player.stats, **profile_stats},
+            club_team_id=str(team.get("id") or ""),
+            club_team_name=team.get("displayName") or team.get("name") or "",
+            club_competition_key=ESPN_LEAGUE_TO_COMPETITION.get(
+                league_slug,
+                "",
+            ),
+        )
+
+    def _load_scoreboard(self, force: bool = False) -> dict[str, Any]:
+        years = [self.season_year]
+        if self.is_league:
+            years.append(self.season_year + 1)
+        events: dict[str, dict[str, Any]] = {}
+        payload: dict[str, Any] = {}
+        for year in years:
+            data = self.fetch_json(
+                self._site_url(f"scoreboard?limit=1000&dates={year}"),
+                self._cache_name(f"scoreboard_{year}"),
+                ttl_seconds=SCOREBOARD_TTL_SECONDS,
+                force=force,
+            )
+            if not payload:
+                payload = dict(data)
+            for event in data.get("events") or []:
+                event_season = event.get("season") or {}
+                if int(event_season.get("year") or self.season_year) != self.season_year:
+                    continue
+                event_id = str(event.get("id") or "")
+                if event_id:
+                    events[event_id] = event
+        payload["events"] = list(events.values())
+        return payload
 
     def fetch_json(self, url: str, cache_name: str, ttl_seconds: int, force: bool = False) -> dict[str, Any]:
         cache_path = self.cache_dir / cache_name
@@ -426,8 +629,12 @@ class DataProvider:
             away = self._match_team_from_espn(away_comp)
             status_type = (event.get("status") or {}).get("type") or (comp.get("status") or {}).get("type") or {}
             season = event.get("season") or {}
-            round_slug = season.get("slug") or ""
+            round_slug = str(season.get("slug") or "")
+            round_slug = ROUND_SLUG_ALIASES.get(round_slug, round_slug)
             round_name = ROUND_LABELS.get(round_slug, season.get("name") or round_slug or "赛事")
+            if self.is_league:
+                round_slug = ""
+                round_name = ""
             group = ""
             if round_slug == "group-stage" and home.id in self.teams and away.id in self.teams:
                 home_group = self.teams[home.id].group
@@ -456,9 +663,52 @@ class DataProvider:
                     statistics=statistics,
                     events=events,
                     source="espn",
+                    competition_key=self.competition_key,
                 )
             )
         return matches
+
+    def _assign_round_numbers(self) -> None:
+        if not self.matches:
+            return
+        future_schedule = (
+            self.is_league
+            and sum(1 for match in self.matches if match.is_upcoming)
+            >= len(self.matches) * 0.8
+        )
+        if self.is_league and not future_schedule:
+            ordered = sorted(
+                self.matches,
+                key=lambda item: (
+                    int(item.id) if item.id.isdigit() else 10**18,
+                    item.id,
+                ),
+            )
+        else:
+            ordered = sorted(
+                self.matches,
+                key=lambda item: (
+                    item.date or datetime.max.replace(tzinfo=timezone.utc),
+                    item.id,
+                ),
+            )
+        appearances: dict[str, int] = {}
+        for match in ordered:
+            if not self.is_league and match.round_slug != "group-stage":
+                continue
+            home_count = appearances.get(match.home.id, 0)
+            away_count = appearances.get(match.away.id, 0)
+            number = max(home_count, away_count) + 1
+            match.round_number = number
+            if self.is_league:
+                match.round_slug = f"matchday-{number}"
+                match.round_name = f"第 {number} 轮"
+            else:
+                match.round_name = f"小组赛第 {number} 轮"
+            if match.home.id:
+                appearances[match.home.id] = max(home_count + 1, number)
+            if match.away.id:
+                appearances[match.away.id] = max(away_count + 1, number)
 
     def _match_statistics_from_espn(self, competitors: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
         result: dict[str, dict[str, str]] = {}
@@ -540,7 +790,11 @@ class DataProvider:
         groups: list[dict[str, Any]] = []
         for child in data.get("children", []):
             group_name = child.get("name") or child.get("abbreviation") or ""
-            group_letter = group_name.replace("Group", "").strip()
+            group_letter = (
+                "积分榜"
+                if self.is_league
+                else group_name.replace("Group", "").strip()
+            )
             entries = []
             for entry in (child.get("standings") or {}).get("entries", []):
                 team_data = entry.get("team") or {}
@@ -589,7 +843,11 @@ class DataProvider:
                     LeaderRow(
                         rank=index,
                         player_id=str(athlete.get("id") or ""),
-                        player_name=athlete.get("displayName") or athlete.get("shortName") or "",
+                        player_name=str(
+                            athlete.get("displayName")
+                            or athlete.get("shortName")
+                            or ""
+                        ).strip(),
                         team_id=team_id,
                         team_name=team_data.get("displayName") or team_data.get("name") or "",
                         team_abbreviation=team_data.get("abbreviation") or "",
@@ -621,8 +879,12 @@ class DataProvider:
             players.append(
                 Player(
                     id=str(athlete.get("id") or ""),
-                    name=athlete.get("displayName") or athlete.get("fullName") or "",
-                    short_name=athlete.get("shortName") or "",
+                    name=str(
+                        athlete.get("displayName")
+                        or athlete.get("fullName")
+                        or ""
+                    ).strip(),
+                    short_name=str(athlete.get("shortName") or "").strip(),
                     jersey=str(athlete.get("jersey") or ""),
                     position=position_text,
                     age=str(athlete.get("age") or ""),
