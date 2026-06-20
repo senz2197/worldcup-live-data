@@ -31,6 +31,8 @@ WorldCupFloat_Portable.zip
 - Favorite team support for every competition
 - Team workflow: click any team logo or name to view team form, results, roster, and detailed player data
 - World Cup player profiles include their club, with direct links into supported European league club cards
+- League rosters automatically fall back to the latest populated ESPN season when a newly opened season is still empty
+- World Cup rosters are enriched with current club relationships in the background and retain player-to-club-to-player navigation
 - Compact-first layout designed to fit within roughly one quarter of a desktop screen width
 - Chinese team and player names by default, with an English-name toggle in settings
 - Player details open as a secondary panel instead of a side-by-side layout
@@ -55,6 +57,7 @@ WorldCupFloat_Portable.zip
 - Live speech reads commentary content only, without announcing the match minute
 - More expressive professional live commentary prompts with strict source-fact safeguards
 - Match stage and status headers share space and scale together without clipping at compact widths
+- Wrapped labels size from their real container width so news, cards, popups, and compact layouts keep complete glyphs visible
 - Full match commentary timelines and cached AI post-match summaries
 
 ## Data Sources

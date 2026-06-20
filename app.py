@@ -17,6 +17,7 @@ import webbrowser
 import weakref
 import zipfile
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import colorchooser, ttk
@@ -61,7 +62,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -705,10 +706,11 @@ class WorldCupFloatApp:
         self.selected_player_id = ""
         self.active_data_board_key = ""
         self.data_board_buttons: dict[str, tk.Label] = {}
-        self.rosters: dict[str, list[Player]] = {}
-        self.roster_loaded_at: dict[str, float] = {}
-        self.roster_errors: dict[str, str | None] = {}
-        self.loading_rosters: set[str] = set()
+        self.rosters: dict[tuple[str, str], list[Player]] = {}
+        self.roster_loaded_at: dict[tuple[str, str], float] = {}
+        self.roster_errors: dict[tuple[str, str], str] = {}
+        self.roster_error_at: dict[tuple[str, str], float] = {}
+        self.loading_rosters: set[tuple[str, str]] = set()
         self.match_labels: dict[str, list[dict[str, object]]] = {}
         self.commentary_entries: dict[str, list[CommentaryEntry]] = {}
         self.commentary_texts: dict[str, dict[int, str]] = {}
@@ -1922,18 +1924,38 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _bind_wrap(self, label: tk.Label, reserve: int = 0, minimum: int = 80, maximum: int = 900) -> tk.Label:
         parent = label.master
         state = {"wraplength": None, "after_id": None}
+        try:
+            # A long requested label width can expand a ScrollFrame body beyond
+            # the viewport before wrapping is applied. Let the geometry manager
+            # allocate the real width first, then wrap inside that allocation.
+            label.configure(width=1)
+        except tk.TclError:
+            pass
 
         def update(event: tk.Event | None = None) -> None:
             state["after_id"] = None
             try:
                 if not label.winfo_exists():
                     return
-                width = event.width if event is not None and event.widget == parent else parent.winfo_width()
-                if width <= 1:
+                label_width = (
+                    event.width
+                    if event is not None and event.widget == label
+                    else label.winfo_width()
+                )
+                if label_width > 1:
+                    available = max(24, label_width - 6)
+                else:
+                    parent_width = (
+                        event.width
+                        if event is not None and event.widget == parent
+                        else parent.winfo_width()
+                    )
+                    available = max(24, parent_width - reserve - 12)
+                if label_width <= 1 and parent.winfo_width() <= 1:
                     if state["after_id"] is None:
                         state["after_id"] = label.after(50, update)
                     return
-                wraplength = max(minimum, min(maximum, width - reserve))
+                wraplength = min(maximum, available)
                 if state["wraplength"] == wraplength:
                     return
                 state["wraplength"] = wraplength
@@ -1942,8 +1964,41 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 return
 
         parent.bind("<Configure>", update, add="+")
+        label.bind("<Configure>", update, add="+")
         label.after_idle(update)
         return label
+
+    def _bind_click_tree(
+        self,
+        widget: tk.Widget,
+        command,
+        cursor: str = "hand2",
+    ) -> None:
+        targets = [widget]
+        targets.extend(self._widget_descendants(widget))
+        for target in targets:
+            try:
+                target.configure(cursor=cursor)
+                self._bind_click(target, command)
+            except tk.TclError:
+                continue
+
+    @staticmethod
+    def _widget_descendants(widget: tk.Widget) -> list[tk.Widget]:
+        result: list[tk.Widget] = []
+        pending = list(widget.winfo_children())
+        while pending:
+            current = pending.pop()
+            result.append(current)
+            pending.extend(current.winfo_children())
+        return result
+
+    def _roster_key(
+        self,
+        team_id: str,
+        competition_key: str | None = None,
+    ) -> tuple[str, str]:
+        return (competition_key or self.active_competition_key, str(team_id))
 
     def _log_tk_exception(self, exc_type, exc_value, exc_tb) -> None:
         log_path = self.provider.cache_dir.parent / "worldcup_error.log"
@@ -3434,10 +3489,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 tuple((board.key, tuple((row.player_id, row.display_value) for row in board.rows[:12])) for board in self._data_boards(snapshot)),
             )
         if tab == "team":
+            roster_key = self._roster_key(
+                self.selected_team_id,
+                snapshot.competition_key,
+            )
             roster_state = (
-                "loading" if self.selected_team_id in self.loading_rosters else
-                "error" if self.selected_team_id in self.roster_errors else
-                len(self.rosters.get(self.selected_team_id, []))
+                "loading" if roster_key in self.loading_rosters else
+                "error" if roster_key in self.roster_errors else
+                len(self.rosters.get(roster_key, []))
             )
             team_matches = [(m.id, m.status_state, m.home.score, m.away.score) for m in snapshot.matches if m.home.id == self.selected_team_id or m.away.id == self.selected_team_id]
             return prefix + ("team", self.selected_team_id, roster_state, tuple(team_matches))
@@ -6350,26 +6409,31 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             "球员名单",
             "点击球员进入详细数据页面",
         )
+        roster_key = self._roster_key(team.id)
         roster_stale = (
-            team.id in self.rosters
-            and time.time() - self.roster_loaded_at.get(team.id, 0)
+            roster_key in self.rosters
+            and time.time() - self.roster_loaded_at.get(roster_key, 0)
             >= self.roster_refresh_hours_var.get() * 3600
         )
+        error_retry_ready = (
+            roster_key not in self.roster_errors
+            or time.time() - self.roster_error_at.get(roster_key, 0) >= 300
+        )
         if (
-            (team.id not in self.rosters or roster_stale)
-            and team.id not in self.loading_rosters
-            and team.id not in self.roster_errors
+            (roster_key not in self.rosters or roster_stale)
+            and roster_key not in self.loading_rosters
+            and error_retry_ready
         ):
-            self.loading_rosters.add(team.id)
+            self.loading_rosters.add(roster_key)
             self._load_roster_async(team.id)
-        if team.id in self.loading_rosters:
+        if roster_key in self.loading_rosters and roster_key not in self.rosters:
             self._empty(parent, "正在加载球员名单...")
             return
-        error = self.roster_errors.get(team.id)
+        error = self.roster_errors.get(roster_key)
         if error:
             self._empty(parent, error)
             return
-        players = self.rosters.get(team.id, [])
+        players = self.rosters.get(roster_key, [])
         if not players:
             self._empty(parent, "暂未取得球员名单。")
             return
@@ -6392,6 +6456,34 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             meta_label = tk.Label(name_box, text=meta or "球员", bg=PANEL, fg=MUTED, anchor="w", justify="left", font=("Microsoft YaHei UI", 8))
             meta_label.pack(fill="x", pady=(2, 0))
             self._bind_wrap(meta_label, reserve=4, minimum=110, maximum=260)
+            club_label = None
+            if player.club_team_name:
+                club_name = self.localizer.team(player.club_team_name)
+                club_label = tk.Label(
+                    name_box,
+                    text=f"效力球队 · {club_name}",
+                    bg=PANEL,
+                    fg=(
+                        ACCENT
+                        if player.club_competition_key
+                        else MUTED
+                    ),
+                    anchor="w",
+                    justify="left",
+                    cursor=(
+                        "hand2"
+                        if player.club_competition_key
+                        else "arrow"
+                    ),
+                    font=("Microsoft YaHei UI", 8, "bold"),
+                )
+                club_label.pack(fill="x", pady=(2, 0))
+                self._bind_wrap(
+                    club_label,
+                    reserve=4,
+                    minimum=110,
+                    maximum=260,
+                )
             stats_box = None
             if (
                 self.snapshot
@@ -6405,33 +6497,58 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     item.pack(side="left", fill="x", expand=True, padx=(0, 5))
                     tk.Label(item, text=label if not self.use_english_var.get() else key, bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 7)).pack(anchor="w")
                     tk.Label(item, text=value or "-", bg=PANEL_2, fg=TEXT, font=("Microsoft YaHei UI", 10, "bold")).pack(anchor="w")
-            widgets = [card, top, name_box, *card.winfo_children()]
-            if stats_box is not None:
-                widgets.append(stats_box)
-            for widget in widgets:
-                self._bind_click(widget, lambda _event, p=player: self._open_player_detail(p))
+            open_player = (
+                lambda _event, current=player:
+                self._open_player_detail(current)
+            )
+            self._bind_click_tree(card, open_player)
+            if club_label is not None and player.club_competition_key:
+                self._bind_click(
+                    club_label,
+                    lambda _event, current=player:
+                    self._open_external_club(
+                        current,
+                        back_action=(
+                            lambda selected=current:
+                            self._open_player_detail(selected)
+                        ),
+                    ),
+                    add="",
+                )
 
     def _load_roster_async(self, team_id: str) -> None:
         competition_key = self.active_competition_key
-        provider = self.provider
+        roster_key = self._roster_key(team_id, competition_key)
+        snapshot = self.snapshot
+        provider = DataProvider(
+            cache_dir=self.provider.cache_dir,
+            competition_key=competition_key,
+        )
+        if snapshot is not None:
+            provider.teams = snapshot.teams
+            provider.season_year = snapshot.season_year
+            provider.season_name = snapshot.season_name
         roster_ttl_hours = self.roster_refresh_hours_var.get()
 
         def worker() -> None:
             players, error = provider.get_roster(team_id, ttl_hours=roster_ttl_hours)
 
-            def apply() -> None:
-                self.loading_rosters.discard(team_id)
-                if error:
-                    self.roster_errors[team_id] = error
+            def apply(current_players: list[Player], current_error: str | None, final: bool) -> None:
+                if final:
+                    self.loading_rosters.discard(roster_key)
+                if current_error:
+                    self.roster_errors[roster_key] = current_error
+                    self.roster_error_at[roster_key] = time.time()
                 else:
-                    self.rosters[team_id] = players
-                    self.roster_loaded_at[team_id] = time.time()
-                    self.roster_errors.pop(team_id, None)
+                    self.rosters[roster_key] = current_players
+                    self.roster_loaded_at[roster_key] = time.time()
+                    self.roster_errors.pop(roster_key, None)
+                    self.roster_error_at.pop(roster_key, None)
                     self._request_name_localization(
                         "player",
                         [
                             player.name
-                            for player in players
+                            for player in current_players
                             if self.localizer.player(
                                 player.name,
                                 player.id,
@@ -6445,7 +6562,31 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 ):
                     self.render_team()
 
-            self.root.after(0, apply)
+            if error or not players:
+                self._post_ui(
+                    lambda current=list(players), message=error:
+                    apply(current, message, True)
+                )
+                return
+
+            if competition_key != "worldcup":
+                self._post_ui(
+                    lambda current=list(players):
+                    apply(current, None, True)
+                )
+                return
+
+            # Show the roster immediately, then enrich it with current clubs.
+            self._post_ui(
+                lambda current=list(players):
+                apply(current, None, False)
+            )
+            with ThreadPoolExecutor(max_workers=6) as executor:
+                enriched = list(executor.map(provider.get_player_profile, players))
+            self._post_ui(
+                lambda current=enriched:
+                apply(current, None, True)
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -6488,8 +6629,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._player_detail(body.body, player)
         self._apply_fonts_to_tree(popup)
 
+        profile_provider = DataProvider(
+            cache_dir=self.provider.cache_dir,
+            competition_key=self.active_competition_key,
+        )
+
         def worker() -> None:
-            enriched = self.provider.get_player_profile(player)
+            enriched = profile_provider.get_player_profile(player)
             self._post_ui(
                 lambda current=enriched:
                 self._apply_player_profile(current)
@@ -6811,18 +6957,23 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             )
             label.pack(side="left", fill="x", expand=True, padx=(8, 0))
             self._bind_wrap(label, reserve=58, minimum=130, maximum=250)
-            for widget in (row, label):
-                self._bind_click(
-                    widget,
-                    lambda _event, selected=current, source=self.club_source_player:
-                    self._open_player_detail(
-                        selected,
-                        back_action=(
-                            (lambda current_source=source: self._open_external_club(current_source, restore_only=True))
-                            if source is not None else None
-                        ),
+            self._bind_click_tree(
+                row,
+                lambda _event, selected=current, source=self.club_source_player:
+                self._open_player_detail(
+                    selected,
+                    back_action=(
+                        (
+                            lambda current_source=source:
+                            self._open_external_club(
+                                current_source,
+                                restore_only=True,
+                            )
+                        )
+                        if source is not None else None
                     ),
-                )
+                ),
+            )
         self._apply_fonts_to_tree(self.club_popup)
 
     def _player_detail(self, parent: tk.Widget, player: Player) -> None:
@@ -6850,9 +7001,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 fg=MUTED,
                 font=("Microsoft YaHei UI", 8),
             ).pack(side="left")
+            club_name = self.localizer.team(player.club_team_name)
             club = tk.Label(
                 club_row,
-                text=player.club_team_name,
+                text=club_name,
                 bg=PANEL_2,
                 fg=ACCENT if player.club_competition_key else TEXT,
                 cursor="hand2" if player.club_competition_key else "arrow",
@@ -6860,8 +7012,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             )
             club.pack(side="right")
             if player.club_competition_key:
-                self._bind_click(
-                    club,
+                self._bind_click_tree(
+                    club_row,
                     lambda _event, current=player:
                     self._open_external_club(current),
                 )

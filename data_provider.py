@@ -433,7 +433,26 @@ class DataProvider:
                 ttl_seconds=max(1, min(168, int(ttl_hours))) * 3600,
                 force=force,
             )
-            return self._parse_roster(data), None
+            players = self._parse_roster(data)
+            if (
+                not players
+                and season_year is None
+                and self.is_league
+                and season > 2000
+            ):
+                previous_season = season - 1
+                fallback = self.fetch_json(
+                    self._site_url(
+                        f"teams/{team_id}/roster?season={previous_season}"
+                    ),
+                    self._cache_name(
+                        f"roster_{previous_season}_{safe_filename(team_id)}"
+                    ),
+                    ttl_seconds=max(1, min(168, int(ttl_hours))) * 3600,
+                    force=force,
+                )
+                players = self._parse_roster(fallback)
+            return players, None
         except Exception as exc:
             return [], f"球员名单暂时不可用: {exc}"
 
