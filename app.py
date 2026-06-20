@@ -61,7 +61,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -789,6 +789,7 @@ class WorldCupFloatApp:
         self.use_english_var = tk.BooleanVar(value=bool(self.config.get("use_english", False)))
         self.quick_refresh_var = tk.BooleanVar(value=bool(self.config.get("quick_refresh", False)))
         self.show_status_var = tk.BooleanVar(value=bool(self.config.get("show_status", False)))
+        self.show_live_labels_var = tk.BooleanVar(value=bool(self.config.get("show_live_labels", True)))
         self.title_alignment_var = tk.StringVar(
             value="left" if self.config.get("title_alignment") == "left" else "center"
         )
@@ -934,6 +935,7 @@ class WorldCupFloatApp:
                         "custom_palette": palette,
                         "quick_refresh": bool(self.quick_refresh_var.get()) if hasattr(self, "quick_refresh_var") else False,
                         "show_status": bool(self.show_status_var.get()) if hasattr(self, "show_status_var") else False,
+                        "show_live_labels": bool(self.show_live_labels_var.get()) if hasattr(self, "show_live_labels_var") else True,
                         "title_alignment": self.title_alignment_var.get() if hasattr(self, "title_alignment_var") else "center",
                         "match_notifications": bool(self.match_notifications_var.get()) if hasattr(self, "match_notifications_var") else True,
                         "ai_commentary": bool(self.ai_commentary_var.get()) if hasattr(self, "ai_commentary_var") else True,
@@ -1284,6 +1286,13 @@ class WorldCupFloatApp:
             return
         if self.snapshot:
             self.root.after(120, lambda: self._maybe_show_match_notification(self.snapshot, include_seen=True) if self.snapshot else None)
+
+    def _toggle_live_labels(self) -> None:
+        self._save_config()
+        self._invalidate_render_cache("live")
+        self._invalidate_render_cache("upcoming")
+        if self.active_tab in {"live", "upcoming"}:
+            self.render_active()
 
     def _apply_quick_refresh_visibility(self) -> None:
         if self.quick_refresh_button is None:
@@ -2896,6 +2905,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             activebackground=PANEL_2,
             activeforeground=TEXT,
         ).pack(anchor="w", pady=(0, 7))
+        tk.Checkbutton(
+            refresh_panel,
+            text="主界面显示直播标签",
+            variable=self.show_live_labels_var,
+            command=self._toggle_live_labels,
+            bg=PANEL_2,
+            fg=TEXT,
+            selectcolor=PANEL_3,
+            activebackground=PANEL_2,
+            activeforeground=TEXT,
+        ).pack(anchor="w", pady=(0, 7))
         interval_row = tk.Frame(refresh_panel, bg=PANEL_2)
         interval_row.pack(fill="x")
         for label, variable in (("比赛中", self.live_refresh_seconds_var), ("非比赛", self.default_refresh_seconds_var)):
@@ -3355,9 +3375,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         matches = self._filtered_matches(snapshot)
         if tab == "live":
             mode, _title, spotlight = self._spotlight_matches(snapshot)
-            return prefix + ("spotlight", mode, self.selected_team_id, tuple((m.id, m.status_state, m.home.score, m.away.score) for m in spotlight))
+            return prefix + ("spotlight", mode, self.selected_team_id, bool(self.show_live_labels_var.get()), tuple((m.id, m.status_state, m.home.score, m.away.score) for m in spotlight))
         if tab == "upcoming":
-            return prefix + ("upcoming", self.round_selection.get("upcoming"), self.selected_team_id, tuple((m.id, m.status_state) for m in matches if m.is_upcoming))
+            return prefix + ("upcoming", self.round_selection.get("upcoming"), self.selected_team_id, bool(self.show_live_labels_var.get()), tuple((m.id, m.status_state) for m in matches if m.is_upcoming))
         if tab == "results":
             completed = [m for m in matches if m.completed]
             completed.sort(key=lambda m: m.date or MIN_DATE, reverse=True)
@@ -3764,12 +3784,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         else:
             pending = [entry for entry in entries if entry.sequence > previous]
         for entry in pending[-3:]:
-            text = self._commentary_line(match.id, entry, limit=180)
-            self.speech_service.speak(
-                f"{self._team_text(match.home)}对阵{self._team_text(match.away)}。{text}",
-                self.tts_voice_var.get(),
-                self.tts_rate_var.get(),
-            )
+            text = self._commentary_text(match.id, entry).strip()
+            minute = str(entry.minute or "").strip()
+            if minute and text.startswith(minute):
+                text = text[len(minute):].lstrip(" ：:.-—")
+            if text:
+                self.speech_service.speak(
+                    text[:180],
+                    self.tts_voice_var.get(),
+                    self.tts_rate_var.get(),
+                )
         self.spoken_commentary_sequences[match.id] = entries[-1].sequence
 
     def _load_complete_detail_commentary(
@@ -4993,7 +5017,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         layout = tk.Frame(card, bg=PANEL)
         layout.pack(fill="x")
         layout.columnconfigure(0, weight=1, uniform="match_team", minsize=72)
-        layout.columnconfigure(1, weight=0, minsize=82)
+        layout.columnconfigure(1, weight=0, minsize=100)
         layout.columnconfigure(2, weight=1, uniform="match_team", minsize=72)
         layout.rowconfigure(0, minsize=82)
         status_color = LIVE if match.is_live or live else (ACCENT if match.completed else WARNING)
@@ -5020,8 +5044,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         status_label.place(relx=1.0, x=-1, y=0, width=1, relheight=1, anchor="ne")
 
         home_labels = self._score_team_block(layout, match.home, align="left", column=0, row=0)
-        scoreline_label = tk.Label(
+        score_box = tk.Frame(
             layout,
+            bg=PANEL,
+            width=100,
+            height=82,
+        )
+        score_box.grid(row=0, column=1, sticky="nsew", padx=3)
+        score_box.grid_propagate(False)
+        scoreline_label = tk.Label(
+            score_box,
             text=self._scoreline(match),
             bg=PANEL,
             fg=TEXT,
@@ -5030,7 +5062,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             font=("Microsoft YaHei UI", 20, "bold"),
         )
         scoreline_label._worldcup_score_font = True
-        scoreline_label.grid(row=0, column=1, sticky="nsew", padx=3)
+        scoreline_label.place(relx=0.5, rely=0.5, anchor="center")
         away_labels = self._score_team_block(layout, match.away, align="right", column=2, row=0)
 
         def align_header(_event: tk.Event | None = None) -> None:
@@ -5038,7 +5070,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 header_width = header.winfo_width()
                 if header_width <= 1:
                     return
-                center_width = 82
+                center_width = 100
                 team_width = max(72, (header_width - center_width) // 2)
                 status_font = tkfont.Font(root=self.root, font=status_label.cget("font"))
                 font_actual = status_font.actual()
@@ -5131,21 +5163,21 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.match_labels.setdefault(match.id, []).append(labels)
         self._bind_match_open(card, match)
         self._bind_match_open(layout, match)
+        self._bind_match_open(score_box, match)
         self._bind_match_open(scoreline_label, match)
         live_target = self._official_live_target(match)
-        if live_target is not None:
-            platform, _url = live_target
+        if live_target is not None and self.show_live_labels_var.get():
             live_button = tk.Label(
-                card,
-                text=f"▶ 直播 · {platform}",
-                bg=PANEL_2,
+                score_box,
+                text="直播",
+                bg=PANEL_3,
                 fg=ACCENT,
                 cursor="hand2",
-                padx=8,
-                pady=5,
-                font=("Microsoft YaHei UI", 8, "bold"),
+                padx=5,
+                pady=1,
+                font=("Microsoft YaHei UI", 7, "bold"),
             )
-            live_button.pack(anchor="e", pady=(8, 0))
+            live_button.place(relx=0.5, rely=1.0, y=-1, anchor="s")
             self._bind_click(live_button, lambda _event, current=match: self._open_official_live(current))
         if match.is_live:
             self._commentary_preview(parent, match)
@@ -5425,17 +5457,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             value_label = tk.Label(row, text=value, bg=PANEL_2, fg=TEXT, anchor="w", justify="left", font=("Microsoft YaHei UI", 9, "bold"))
             value_label.pack(side="left", fill="x", expand=True)
             self._bind_wrap(value_label, reserve=56, minimum=130, maximum=260)
-        live_target = self._official_live_target(match)
-        live_row = tk.Frame(box, bg=PANEL_2, padx=9, pady=7)
-        live_row.pack(fill="x", pady=3)
-        tk.Label(live_row, text="直播", bg=PANEL_2, fg=MUTED, width=5, anchor="w", font=("Microsoft YaHei UI", 8, "bold")).pack(side="left")
-        if live_target is None:
-            tk.Label(live_row, text="暂无匹配的官方直播入口", bg=PANEL_2, fg=MUTED, anchor="w", font=("Microsoft YaHei UI", 9)).pack(side="left", fill="x", expand=True)
-        else:
-            platform, _url = live_target
-            button = tk.Label(live_row, text=f"▶ 前往 {platform}", bg=PANEL_3, fg=ACCENT, cursor="hand2", padx=8, pady=4, font=("Microsoft YaHei UI", 8, "bold"))
-            button.pack(side="left")
-            self._bind_click(button, lambda _event, current=match: self._open_official_live(current))
+        if not match.completed:
+            live_target = self._official_live_target(match)
+            live_row = tk.Frame(box, bg=PANEL_2, padx=9, pady=7)
+            live_row.pack(fill="x", pady=3)
+            tk.Label(live_row, text="直播", bg=PANEL_2, fg=MUTED, width=5, anchor="w", font=("Microsoft YaHei UI", 8, "bold")).pack(side="left")
+            if live_target is None:
+                tk.Label(live_row, text="暂无匹配的官方直播入口", bg=PANEL_2, fg=MUTED, anchor="w", font=("Microsoft YaHei UI", 9)).pack(side="left", fill="x", expand=True)
+            else:
+                platform, _url = live_target
+                button = tk.Label(live_row, text=f"▶ 前往 {platform}", bg=PANEL_3, fg=ACCENT, cursor="hand2", padx=8, pady=4, font=("Microsoft YaHei UI", 8, "bold"))
+                button.pack(side="left")
+                self._bind_click(button, lambda _event, current=match: self._open_official_live(current))
         self._match_events_panel(parent, match)
         self._match_stats_panel(parent, match)
         self._match_commentary_panel(parent, match)

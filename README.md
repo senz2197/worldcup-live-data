@@ -48,6 +48,8 @@ WorldCupFloat_Portable.zip
 - Free machine translation fallback for commentary and news when AI is disabled or unavailable
 - Player rosters refresh every 24 hours by default, with a configurable interval
 - Official rights-holder links for live matches and fixtures starting within five minutes
+- Optional compact live-source labels beneath the centered score; completed match details omit live links
+- Live speech reads commentary content only, without announcing the match minute
 - Full match commentary timelines and cached AI post-match summaries
 
 ## Data Sources

@@ -28,6 +28,7 @@
   },
   "quick_refresh": false,
   "show_status": false,
+  "show_live_labels": true,
   "title_alignment": "center",
   "match_notifications": true,
   "ai_commentary": true,
