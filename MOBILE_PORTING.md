@@ -21,3 +21,4 @@ Shared concepts suitable for reuse:
 - Snapshot, match, team, player, leaderboard, and commentary models.
 - Official broadcaster-link policy.
 - Cached Chinese name mappings and AI commentary cache format.
+- League news models, translation cache, and favorite-team prioritization.

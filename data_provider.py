@@ -73,7 +73,7 @@ WORLDCUP26_GAMES_URL = "https://worldcup26.ir/get/games"
 WORLDCUP26_TEAMS_URL = "https://worldcup26.ir/get/teams"
 WORLDCUP26_GROUPS_URL = "https://worldcup26.ir/get/groups"
 
-SCOREBOARD_TTL_SECONDS = 12
+SCOREBOARD_TTL_SECONDS = 5
 STANDINGS_TTL_SECONDS = 60
 STATS_TTL_SECONDS = 120
 
@@ -418,6 +418,7 @@ class DataProvider:
         team_id: str,
         force: bool = False,
         season_year: int | None = None,
+        ttl_hours: int = 24,
     ) -> tuple[list[Player], str | None]:
         if not team_id or team_id not in self.teams:
             return [], "没有找到可用的球队 ID。"
@@ -429,7 +430,7 @@ class DataProvider:
             data = self.fetch_json(
                 self._site_url(f"teams/{team_id}/roster?season={season}"),
                 self._cache_name(f"roster_{season}_{safe_filename(team_id)}"),
-                ttl_seconds=6 * 3600,
+                ttl_seconds=max(1, min(168, int(ttl_hours))) * 3600,
                 force=force,
             )
             return self._parse_roster(data), None
@@ -445,7 +446,7 @@ class DataProvider:
         if not match_id:
             return [], {}, "缺少比赛 ID"
         # Completed play-by-play is immutable; retain it for fast detail opening.
-        ttl = 8 if live else 365 * 24 * 3600
+        ttl = 2 if live else 365 * 24 * 3600
         try:
             data = self.fetch_json(
                 self._site_url(f"summary?event={match_id}"),

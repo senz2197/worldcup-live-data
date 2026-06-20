@@ -163,7 +163,9 @@ class CommentaryService:
         generation = self.cache_generation
         cached = self.event_texts(match.id, mode=mode)
         missing_all = [entry for entry in entries if entry.sequence not in cached]
-        if cached:
+        if match.is_live:
+            missing = missing_all[-3:]
+        elif cached:
             latest_cached = max(cached)
             new_entries = [entry for entry in missing_all if entry.sequence > latest_cached]
             newest = new_entries[-6:]
@@ -541,6 +543,55 @@ class CommentaryService:
             if source in allowed and str(translated).strip()
         }
 
+    def translate_news(
+        self,
+        title: str,
+        summary: str,
+        glossary: dict[str, str],
+        api_key: str,
+    ) -> tuple[str, str]:
+        prompt = (
+            "将足球新闻标题与摘要翻译并润色为简体中文，保持新闻事实和语气，"
+            "不要补充原文不存在的信息。人名和球队名必须严格使用给定术语表。"
+            "只返回 JSON 对象，字段为 title 和 summary。\n"
+            f"术语表：{json.dumps(glossary, ensure_ascii=False)}\n"
+            f"标题：{title}\n摘要：{summary}"
+        )
+        text = self._chat(prompt, api_key, max_tokens=700, timeout_seconds=45)
+        candidate = text.strip()
+        start = candidate.find("{")
+        end = candidate.rfind("}")
+        if start >= 0 and end > start:
+            candidate = candidate[start:end + 1]
+        data = json.loads(candidate)
+        return str(data.get("title") or title).strip(), str(data.get("summary") or summary).strip()
+
+    def translate_news_batch(
+        self,
+        items: list[dict[str, str]],
+        glossary: dict[str, str],
+        api_key: str,
+    ) -> dict[str, tuple[str, str]]:
+        prompt = (
+            "批量翻译并润色以下足球新闻为简体中文，保持事实，不增加原文没有的信息。"
+            "人名和球队名必须严格使用术语表。只返回 JSON 对象，键为新闻 id，"
+            "值为含 title 与 summary 的对象。\n"
+            f"术语表：{json.dumps(glossary, ensure_ascii=False)}\n"
+            f"新闻：{json.dumps(items, ensure_ascii=False)}"
+        )
+        text = self._chat(prompt, api_key, max_tokens=max(1200, len(items) * 260), timeout_seconds=70)
+        start = text.find("{")
+        end = text.rfind("}")
+        data = json.loads(text[start:end + 1] if start >= 0 and end > start else text)
+        return {
+            str(item_id): (
+                str(row.get("title") or "").strip(),
+                str(row.get("summary") or "").strip(),
+            )
+            for item_id, row in data.items()
+            if isinstance(row, dict)
+        }
+
     def summary_signature(self, match: Match, entries: list[CommentaryEntry]) -> str:
         latest = entries[-1].sequence if entries else -1
         return f"deep-v8:{match.home.score}-{match.away.score}:{latest}:{len(entries)}"
@@ -577,7 +628,7 @@ class CommentaryService:
             "max_tokens": max_tokens,
         }
         with self.request_lock:
-            wait_seconds = max(0.0, 3.2 - (time.monotonic() - self.last_request_at))
+            wait_seconds = max(0.0, 0.8 - (time.monotonic() - self.last_request_at))
             if wait_seconds:
                 time.sleep(wait_seconds)
             request = urllib.request.Request(

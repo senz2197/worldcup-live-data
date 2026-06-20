@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+from PyInstaller.utils.hooks import collect_data_files
 
 
 project_dir = Path(SPECPATH)
@@ -10,8 +11,21 @@ a = Analysis(
     ["worldcup_float.py"],
     pathex=[str(project_dir)],
     binaries=[],
-    datas=[("localization_zh.json", "."), ("assets/app_icons", "assets/app_icons")],
-    hiddenimports=["pyttsx3.drivers", "pyttsx3.drivers.sapi5"],
+    datas=[
+        ("localization_zh.json", "."),
+        ("assets/app_icons", "assets/app_icons"),
+        *collect_data_files("opencc"),
+    ],
+    hiddenimports=[
+        "pyttsx3.drivers",
+        "pyttsx3.drivers.sapi5",
+        "winrt.windows.foundation",
+        "winrt.windows.foundation.collections",
+        "winrt.windows.media.core",
+        "winrt.windows.media.playback",
+        "winrt.windows.media.speechsynthesis",
+        "winrt.windows.storage.streams",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

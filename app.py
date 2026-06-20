@@ -5,6 +5,7 @@ import ctypes
 import json
 import os
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,8 @@ import tkinter.font as tkfont
 from commentary_service import CommentaryService
 from data_provider import COMPETITIONS, CommentaryEntry, DataProvider, LeaderRow, Leaderboard, Match, MatchTeam, Player, Snapshot, Team
 from localization import NameLocalizer
+from news_service import FreeTranslationService, NewsItem, NewsService
+from name_service import WikidataNameService
 from speech_service import SpeechService
 
 
@@ -58,7 +61,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -664,6 +667,9 @@ class WorldCupFloatApp:
             competition_key=self.active_competition_key
         )
         self.commentary_service = CommentaryService(self.provider.cache_dir)
+        self.news_service = NewsService(self.provider.cache_dir)
+        self.free_translation_service = FreeTranslationService(self.provider.cache_dir)
+        self.wikidata_name_service = WikidataNameService(self.provider.cache_dir)
         self.speech_service = SpeechService()
         self.ai_prewarm_running = False
         self.ai_prewarm_scheduled = False
@@ -700,6 +706,7 @@ class WorldCupFloatApp:
         self.active_data_board_key = ""
         self.data_board_buttons: dict[str, tk.Label] = {}
         self.rosters: dict[str, list[Player]] = {}
+        self.roster_loaded_at: dict[str, float] = {}
         self.roster_errors: dict[str, str | None] = {}
         self.loading_rosters: set[str] = set()
         self.match_labels: dict[str, list[dict[str, tk.Label]]] = {}
@@ -740,6 +747,7 @@ class WorldCupFloatApp:
         self.club_popup: tk.Toplevel | None = None
         self.club_popup_body: tk.Widget | None = None
         self.club_source_player: Player | None = None
+        self.news_popup: tk.Toplevel | None = None
         self.match_popup: tk.Toplevel | None = None
         self.match_popup_match_id = ""
         self.match_popup_opening = False
@@ -787,6 +795,8 @@ class WorldCupFloatApp:
         self.match_notifications_var = tk.BooleanVar(value=bool(self.config.get("match_notifications", True)))
         self.ai_commentary_var = tk.BooleanVar(value=bool(self.config.get("ai_commentary", True)))
         self.ai_translate_raw_var = tk.BooleanVar(value=bool(self.config.get("ai_translate_raw", False)))
+        if self.ai_commentary_var.get() and self.ai_translate_raw_var.get():
+            self.ai_translate_raw_var.set(False)
         self.commentary_lines_var = tk.IntVar(value=self._valid_commentary_lines(self.config.get("commentary_lines"), 3))
         self.tts_enabled_var = tk.BooleanVar(value=bool(self.config.get("tts_enabled", False)))
         self.tts_voice_var = tk.StringVar(value=str(self.config.get("tts_voice") or ""))
@@ -794,12 +804,18 @@ class WorldCupFloatApp:
         self.speech_voices = self.speech_service.voices()
         self.spoken_commentary_sequences: dict[str, int] = {}
         self.professional_boards_cache: dict[str, list[Leaderboard]] = {}
+        self.professional_boards_loaded_at: dict[str, float] = {}
         self.professional_boards_loading: set[str] = set()
+        self.news_items: dict[str, list[NewsItem]] = {}
+        self.news_loading: set[str] = set()
         self.agnes_api_key_var = tk.StringVar(value=str(self.secrets.get("agnes_api_key") or ""))
         self.ai_status_var = tk.StringVar(value="AI 已启用" if self.agnes_api_key_var.get().strip() else "未设置 API Key，将显示原始数据")
         self.ai_cache_status_var = tk.StringVar(value=self._ai_cache_status_text())
         self.live_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("live_refresh_seconds"), 5))
         self.default_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("default_refresh_seconds"), 300))
+        self.roster_refresh_hours_var = tk.IntVar(value=max(1, min(168, int(self.config.get("roster_refresh_hours") or 24))))
+        self.news_weeks_var = tk.IntVar(value=max(1, min(12, int(self.config.get("news_weeks") or 1))))
+        self.free_translate_var = tk.BooleanVar(value=bool(self.config.get("free_translate", True)))
         self.update_status_var = tk.StringVar(value=f"当前版本 {APP_VERSION}")
         self.root.attributes("-alpha", max(0.72, min(1.0, float(self.alpha_var.get()))))
         self.root.attributes("-topmost", self.topmost_var.get())
@@ -815,6 +831,7 @@ class WorldCupFloatApp:
         self.refresh_data(force=False, quiet=False)
         self.auto_refresh_after_id: str | None = None
         self._schedule_next_refresh()
+        self.root.after(1600, self._commentary_poll)
         self.root.after(60 * 60 * 1000, self._maintain_ai_cache)
 
     def run(self) -> None:
@@ -921,6 +938,7 @@ class WorldCupFloatApp:
                         "match_notifications": bool(self.match_notifications_var.get()) if hasattr(self, "match_notifications_var") else True,
                         "ai_commentary": bool(self.ai_commentary_var.get()) if hasattr(self, "ai_commentary_var") else True,
                         "ai_translate_raw": bool(self.ai_translate_raw_var.get()) if hasattr(self, "ai_translate_raw_var") else False,
+                        "free_translate": bool(self.free_translate_var.get()) if hasattr(self, "free_translate_var") else True,
                         "commentary_lines": self._valid_commentary_lines(self.commentary_lines_var.get(), 3) if hasattr(self, "commentary_lines_var") else 3,
                         "tts_enabled": bool(self.tts_enabled_var.get()) if hasattr(self, "tts_enabled_var") else False,
                         "tts_voice": self.tts_voice_var.get() if hasattr(self, "tts_voice_var") else "",
@@ -931,6 +949,8 @@ class WorldCupFloatApp:
                         "window_geometry": self.root.geometry() if hasattr(self, "root") else "",
                         "live_refresh_seconds": self._valid_seconds(self.live_refresh_seconds_var.get(), 5) if hasattr(self, "live_refresh_seconds_var") else 5,
                         "default_refresh_seconds": self._valid_seconds(self.default_refresh_seconds_var.get(), 300) if hasattr(self, "default_refresh_seconds_var") else 300,
+                        "roster_refresh_hours": max(1, min(168, int(self.roster_refresh_hours_var.get()))) if hasattr(self, "roster_refresh_hours_var") else 24,
+                        "news_weeks": max(1, min(12, int(self.news_weeks_var.get()))) if hasattr(self, "news_weeks_var") else 1,
                         "ui_font": self._valid_font_name(self.ui_font_var.get(), DEFAULT_UI_FONT) if hasattr(self, "ui_font_var") else DEFAULT_UI_FONT,
                         "score_font": self._valid_font_name(self.score_font_var.get(), DEFAULT_SCORE_FONT) if hasattr(self, "score_font_var") else DEFAULT_SCORE_FONT,
                     },
@@ -974,6 +994,11 @@ class WorldCupFloatApp:
             self.club_popup.destroy()
         self.club_popup = None
         self.club_popup_body = None
+
+    def _close_news_popup(self) -> None:
+        if self.news_popup is not None and self.news_popup.winfo_exists():
+            self.news_popup.destroy()
+        self.news_popup = None
 
     def _valid_color(self, value: str | None, fallback: str = ACCENT) -> str:
         value = str(value or "").strip()
@@ -1053,6 +1078,7 @@ class WorldCupFloatApp:
             self.api_help_popup,
             self.player_popup,
             self.club_popup,
+            self.news_popup,
             self.match_popup,
             self.match_notification_popup,
         ):
@@ -1114,6 +1140,8 @@ class WorldCupFloatApp:
                 self._restyle_widget_tree(self.player_popup, old, clean)
             if self.club_popup is not None and self.club_popup.winfo_exists():
                 self._restyle_widget_tree(self.club_popup, old, clean)
+            if self.news_popup is not None and self.news_popup.winfo_exists():
+                self._restyle_widget_tree(self.news_popup, old, clean)
             self._configure_fonts()
             self._invalidate_render_cache()
             self.render_active()
@@ -1279,8 +1307,19 @@ class WorldCupFloatApp:
     def _save_refresh_settings(self, *_args) -> None:
         self.live_refresh_seconds_var.set(self._valid_seconds(self.live_refresh_seconds_var.get(), 5))
         self.default_refresh_seconds_var.set(self._valid_seconds(self.default_refresh_seconds_var.get(), 300))
+        self.roster_refresh_hours_var.set(max(1, min(168, int(self.roster_refresh_hours_var.get() or 24))))
+        self.professional_boards_loaded_at.clear()
+        self.roster_loaded_at.clear()
         self._save_config()
         self._schedule_next_refresh()
+
+    def _save_news_settings(self, *_args) -> None:
+        self.news_weeks_var.set(max(1, min(12, int(self.news_weeks_var.get() or 1))))
+        self.news_items.pop(self.active_competition_key, None)
+        self._invalidate_render_cache("news")
+        self._save_config()
+        if self.active_tab == "news" and self.snapshot:
+            self.render_news()
 
     def _save_tts_settings(self, *_args) -> None:
         self.tts_rate_var.set(max(120, min(260, int(self.tts_rate_var.get() or 185))))
@@ -1301,6 +1340,8 @@ class WorldCupFloatApp:
             self._refresh_live_commentary(self.snapshot, force=True)
 
     def _toggle_ai_commentary(self) -> None:
+        if self.ai_commentary_var.get():
+            self.ai_translate_raw_var.set(False)
         self._save_config()
         self.commentary_texts.clear()
         self._update_all_commentary_labels()
@@ -1308,10 +1349,19 @@ class WorldCupFloatApp:
             self._refresh_live_commentary(self.snapshot, force=True)
 
     def _toggle_raw_translation(self) -> None:
+        if self.ai_translate_raw_var.get():
+            self.ai_commentary_var.set(False)
         self._save_config()
         self.commentary_texts.clear()
         self._update_all_commentary_labels()
         if not self.ai_commentary_var.get() and self.ai_translate_raw_var.get() and self.snapshot:
+            self._refresh_live_commentary(self.snapshot, force=True)
+
+    def _toggle_free_translation(self) -> None:
+        self._save_config()
+        self.commentary_texts.clear()
+        self._update_all_commentary_labels()
+        if self.snapshot:
             self._refresh_live_commentary(self.snapshot, force=True)
 
     def _test_agnes_connection(self) -> None:
@@ -1901,19 +1951,19 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _team_text(self, team: Team | MatchTeam | LeaderRow) -> str:
         name = getattr(team, "name", "") or getattr(team, "team_name", "")
         abbreviation = getattr(team, "abbreviation", "") or getattr(team, "team_abbreviation", "")
-        return self.localizer.team(name, abbreviation, english=self.use_english_var.get())
+        return self.localizer.team(name, abbreviation, english=False)
 
     def _player_text(self, name: str, player_id: str = "") -> str:
         return self.localizer.player(name, player_id=player_id, english=self.use_english_var.get())
 
     def _position_text(self, name: str) -> str:
-        return self.localizer.position(name, english=self.use_english_var.get())
+        return self.localizer.position(name, english=False)
 
     def _board_text(self, key: str, fallback: str) -> str:
-        return self.localizer.board(key, fallback, english=self.use_english_var.get())
+        return self.localizer.board(key, fallback, english=False)
 
     def _stat_label(self, key: str) -> str:
-        return key if self.use_english_var.get() else PLAYER_STAT_LABELS.get(key, key)
+        return PLAYER_STAT_LABELS.get(key, key)
 
     def _team_option_text(self, team: Team) -> str:
         return f"{team.abbreviation or team.name} · {self._team_text(team)}"
@@ -2078,6 +2128,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             ("standings", "积分"),
             ("bracket", "淘汰"),
             ("data", "榜单"),
+            ("news", "资讯"),
             ("team", "球队"),
         ]
         for key, label in tab_defs:
@@ -2118,6 +2169,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             if not (
                 key == "bracket"
                 and self.active_competition_key != "worldcup"
+            ) and not (
+                key == "news"
+                and self.active_competition_key == "worldcup"
             )
         ]
 
@@ -2395,6 +2449,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.api_help_popup,
             self.player_popup,
             self.club_popup,
+            self.news_popup,
             self.match_popup,
             self.match_notification_popup,
         ):
@@ -2417,6 +2472,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 self._close_player_popup()
             elif popup is self.club_popup:
                 self._close_club_popup()
+            elif popup is self.news_popup:
+                self._close_news_popup()
             elif popup is self.match_popup:
                 self._close_match_popup(popup)
             elif popup is self.match_notification_popup:
@@ -2532,6 +2589,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 self.player_popup.destroy()
             if self.club_popup is not None:
                 self.club_popup.destroy()
+            if self.news_popup is not None:
+                self.news_popup.destroy()
             if self.competition_popup is not None:
                 self.competition_popup.destroy()
         except Exception:
@@ -2860,13 +2919,33 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             tk.Label(value_row, text="秒", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side="left", padx=(5, 0))
             entry.bind("<Return>", self._save_refresh_settings)
             entry.bind("<FocusOut>", self._save_refresh_settings)
+        roster_row = tk.Frame(refresh_panel, bg=PANEL_2)
+        roster_row.pack(fill="x", pady=(8, 0))
+        tk.Label(roster_row, text="球员名单更新", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side="left")
+        roster_entry = tk.Entry(roster_row, textvariable=self.roster_refresh_hours_var, bg=PANEL_3, fg=TEXT, insertbackground=TEXT, relief="flat", width=5, justify="center", font=("Microsoft YaHei UI", 9, "bold"))
+        roster_entry.pack(side="right", ipady=3)
+        tk.Label(roster_row, text="小时", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side="right", padx=(0, 6))
+        roster_entry.bind("<Return>", self._save_refresh_settings)
+        roster_entry.bind("<FocusOut>", self._save_refresh_settings)
+
+        tk.Label(body, text="联赛资讯", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
+        news_panel = tk.Frame(body, bg=PANEL_2, padx=9, pady=8, highlightthickness=1, highlightbackground=LINE)
+        news_panel.pack(fill="x", pady=(3, 10))
+        news_row = tk.Frame(news_panel, bg=PANEL_2)
+        news_row.pack(fill="x")
+        tk.Label(news_row, text="显示最近", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side="left")
+        news_entry = tk.Entry(news_row, textvariable=self.news_weeks_var, bg=PANEL_3, fg=TEXT, insertbackground=TEXT, relief="flat", width=5, justify="center", font=("Microsoft YaHei UI", 9, "bold"))
+        news_entry.pack(side="right", ipady=3)
+        tk.Label(news_row, text="周", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side="right", padx=(0, 6))
+        news_entry.bind("<Return>", self._save_news_settings)
+        news_entry.bind("<FocusOut>", self._save_news_settings)
 
         tk.Label(body, text="实时解说", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
         commentary_panel = tk.Frame(body, bg=PANEL_2, padx=9, pady=8, highlightthickness=1, highlightbackground=LINE)
         commentary_panel.pack(fill="x", pady=(3, 10))
         tk.Checkbutton(
             commentary_panel,
-            text="使用 AI 生成中文解说",
+            text="AI 中文解说润色",
             variable=self.ai_commentary_var,
             command=self._toggle_ai_commentary,
             bg=PANEL_2,
@@ -2877,9 +2956,20 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         ).pack(anchor="w")
         tk.Checkbutton(
             commentary_panel,
-            text="原始数据模式下使用 AI 中文翻译",
+            text="AI 直译原始事件（与上项二选一）",
             variable=self.ai_translate_raw_var,
             command=self._toggle_raw_translation,
+            bg=PANEL_2,
+            fg=TEXT,
+            selectcolor=PANEL_3,
+            activebackground=PANEL_2,
+            activeforeground=TEXT,
+        ).pack(anchor="w", pady=(5, 0))
+        tk.Checkbutton(
+            commentary_panel,
+            text="AI 未启用或失败时使用免费中文翻译",
+            variable=self.free_translate_var,
+            command=self._toggle_free_translation,
             bg=PANEL_2,
             fg=TEXT,
             selectcolor=PANEL_3,
@@ -3005,7 +3095,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         ).pack(anchor="w", pady=(0, 10))
         tk.Checkbutton(
             body,
-            text="显示英文名",
+            text="显示球员英文名",
             variable=self.use_english_var,
             command=self._refresh_language,
             bg=PANEL,
@@ -3054,16 +3144,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             return
         self.tab_switching = True
         try:
-            self.tabs[self.active_tab].pack_forget()
+            previous = self.active_tab
             self.active_tab = key
+            if self._tab_needs_render(key):
+                self.render_active()
+            self.tabs[previous].pack_forget()
             self.tabs[key].pack(fill="both", expand=True)
             for tab, button in self.tab_buttons.items():
                 active = tab == key
                 button.configure(bg=PANEL if active else BG, fg=ACCENT if active else MUTED)
-            if self._tab_needs_render(key):
-                self.render_active()
         finally:
-            self.root.after(40, lambda: setattr(self, "tab_switching", False))
+            self.root.after_idle(lambda: setattr(self, "tab_switching", False))
 
     def _tab_needs_render(self, key: str | None = None) -> bool:
         key = key or self.active_tab
@@ -3303,6 +3394,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             )
             team_matches = [(m.id, m.status_state, m.home.score, m.away.score) for m in snapshot.matches if m.home.id == self.selected_team_id or m.away.id == self.selected_team_id]
             return prefix + ("team", self.selected_team_id, roster_state, tuple(team_matches))
+        if tab == "news":
+            rows = self.news_items.get(snapshot.competition_key, [])
+            return prefix + (
+                "news",
+                self.favorite_teams.get(snapshot.competition_key, ""),
+                self.news_weeks_var.get(),
+                tuple((item.id, item.translated_title) for item in rows),
+            )
         return prefix + (tab, self.selected_team_id)
 
     def _update_visible_text(self) -> None:
@@ -3464,10 +3563,15 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 "standings": self.render_standings,
                 "bracket": self.render_bracket,
                 "data": self.render_data,
+                "news": self.render_news,
                 "team": self.render_team,
             }
             renderers[self.active_tab]()
-            self._apply_fonts_to_tree(frame)
+            if (
+                self.ui_font_var.get() != DEFAULT_UI_FONT
+                or self.score_font_var.get() != DEFAULT_SCORE_FONT
+            ):
+                self._apply_fonts_to_tree(frame)
             frame.end_update()
             self.rendered_signature = current_signature
             self.tab_rendered_signatures[self.active_tab] = current_signature
@@ -3495,6 +3599,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             if match.is_live:
                 self._load_match_commentary(match, force=force)
 
+    def _commentary_poll(self) -> None:
+        try:
+            if self.snapshot:
+                self._refresh_live_commentary(self.snapshot, force=True)
+            self.root.after(2000, self._commentary_poll)
+        except tk.TclError:
+            pass
+
     def _load_match_commentary(
         self,
         match: Match,
@@ -3508,6 +3620,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.commentary_loading.add(match.id)
         use_ai = bool(self.ai_commentary_var.get())
         translate_raw = bool(self.ai_translate_raw_var.get())
+        free_translate = bool(self.free_translate_var.get())
         api_key = self.agnes_api_key_var.get().strip()
 
         def worker() -> None:
@@ -3520,11 +3633,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             translations = self.commentary_service.event_texts(match.id, mode=mode)
             ai_error = ""
             ai_requested = bool(entries and api_key and (use_ai or translate_raw))
+            immediate = dict(translations)
+            for entry in entries[-6:]:
+                immediate.setdefault(entry.sequence, entry.text)
+            self._post_ui(
+                lambda current=match, rows=entries, texts=immediate, detail_error=error:
+                self._apply_commentary_source_result(current, rows, texts, detail_error or "")
+            )
             if ai_requested:
-                self._post_ui(
-                    lambda current=match, rows=entries, texts=translations, detail_error=error:
-                    self._apply_commentary_source_result(current, rows, texts, detail_error or "")
-                )
                 try:
                     if use_ai:
                         translations = self.commentary_service.narrate_events(match, entries, api_key)
@@ -3532,6 +3648,15 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                         translations = self.commentary_service.translate_events(match, entries, api_key)
                 except Exception as exc:
                     ai_error = str(exc)
+            if entries and free_translate and (not ai_requested or ai_error):
+                glossary = self._commentary_glossary(match, entries[-6:])
+                for entry in entries[-6:]:
+                    if entry.sequence in translations and not ai_error:
+                        continue
+                    try:
+                        translations[entry.sequence] = self.free_translation_service.translate(entry.text, glossary)
+                    except Exception:
+                        translations[entry.sequence] = entry.text
             self._post_ui(
                 lambda current=match, rows=entries, texts=translations, detail_error=error, model_error=ai_error, summarize=request_summary:
                 self._apply_commentary_result(
@@ -3544,6 +3669,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _commentary_glossary(self, match: Match, entries: list[CommentaryEntry]) -> dict[str, str]:
+        text = " ".join(entry.text for entry in entries).casefold()
+        mappings = {
+            match.home.name: self._team_text(match.home),
+            match.away.name: self._team_text(match.away),
+            **self.localizer.players,
+        }
+        return {
+            source: target for source, target in mappings.items()
+            if source and len(source) >= 3 and source.casefold() in text
+        }
 
     def _apply_commentary_source_result(
         self,
@@ -3648,6 +3785,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.detail_commentary_errors.pop(match.id, None)
         self._render_detail_commentary(match)
         api_key = self.agnes_api_key_var.get().strip()
+        free_translate = self.free_translate_var.get()
 
         def worker() -> None:
             entries, _detail, source_error = self.provider.get_match_commentary(
@@ -3657,9 +3795,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             )
             translations: dict[int, str] = {}
             error = source_error or ""
-            if not error and not api_key:
-                error = "未设置 AI API Key"
-            if not error and entries:
+            if not error and entries and api_key:
                 try:
                     translations = self.commentary_service.translate_complete_timeline(
                         match,
@@ -3672,6 +3808,22 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                         entry.sequence: entry.text
                         for entry in entries
                     }
+            elif not error and entries and free_translate:
+                try:
+                    glossary = self._commentary_glossary(match, entries)
+                    rows = self.free_translation_service.translate_many(
+                        [entry.text for entry in entries],
+                        glossary,
+                    )
+                    translations = {
+                        entry.sequence: text
+                        for entry, text in zip(entries, rows)
+                    }
+                except Exception as exc:
+                    error = self._friendly_commentary_error(exc)
+                    translations = {entry.sequence: entry.text for entry in entries}
+            elif not error and not api_key:
+                error = "未设置 AI API Key，且免费中文翻译未开启"
             self._post_ui(
                 lambda current=match, rows=entries, texts=translations, detail_error=error, summarize=request_summary:
                 self._apply_complete_detail_commentary(
@@ -3782,7 +3934,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         return f"AI 中文润色暂时不可用，已显示原始文字直播：{text or '未知错误'}"
 
     def _commentary_ai_mode(self) -> bool:
-        return bool(self.ai_commentary_var.get() or self.ai_translate_raw_var.get())
+        return bool(
+            self.ai_commentary_var.get()
+            or self.ai_translate_raw_var.get()
+            or self.free_translate_var.get()
+        )
 
     def _commentary_line(self, match_id: str, entry: CommentaryEntry, limit: int = 38) -> str:
         prefix = f"{entry.minute} " if entry.minute else ""
@@ -4272,6 +4428,201 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         selected = next(board for board in boards if board.key == self.active_data_board_key)
         self._leaderboard(frame.body, selected)
 
+    def render_news(self) -> None:
+        frame = self.tabs["news"]
+        frame.clear()
+        if not self.snapshot or self.snapshot.competition_kind != "league":
+            self._empty(frame.body, "世界杯模式暂不显示联赛资讯。")
+            return
+        self._section(
+            frame.body,
+            f"{self.snapshot.competition_name}资讯",
+            f"近 {self.news_weeks_var.get()} 周 · 联赛与主队重要动态",
+        )
+        key = self.snapshot.competition_key
+        if key not in self.news_items and key not in self.news_loading:
+            self._load_news(self.snapshot)
+        items = self.news_items.get(key, [])
+        if key in self.news_loading and not items:
+            self._empty(frame.body, "正在整理联赛资讯…")
+            return
+        if not items:
+            self._empty(frame.body, "所选时间范围内暂无资讯。")
+            return
+        favorite = self.favorite_teams.get(key, "")
+        for item in items:
+            glossary = self._news_glossary(item)
+            item.translated_title = self._enforce_glossary(item.translated_title, glossary)
+            item.translated_summary = self._enforce_glossary(item.translated_summary, glossary)
+            card = tk.Frame(
+                frame.body,
+                bg=PANEL,
+                padx=11,
+                pady=9,
+                cursor="hand2",
+                highlightthickness=1,
+                highlightbackground=ACCENT if favorite and favorite in item.team_ids else LINE,
+            )
+            card.pack(fill="x", pady=4)
+            meta = f"{item.published.strftime('%m-%d %H:%M')} · {item.source}"
+            if favorite and favorite in item.team_ids:
+                meta += " · 主队"
+            tk.Label(card, text=meta, bg=PANEL, fg=ACCENT, anchor="w", font=("Microsoft YaHei UI", 8, "bold")).pack(fill="x")
+            title = tk.Label(
+                card,
+                text=item.translated_title or item.title,
+                bg=PANEL,
+                fg=TEXT,
+                anchor="w",
+                justify="left",
+                font=("Microsoft YaHei UI", 10, "bold"),
+            )
+            title.pack(fill="x", pady=(4, 0))
+            self._bind_wrap(title, reserve=6, minimum=120, maximum=390)
+            for widget in (card, title):
+                self._bind_click(widget, lambda _event, current=item: self._open_news_detail(current))
+
+    def _load_news(self, snapshot: Snapshot, force: bool = False) -> None:
+        key = snapshot.competition_key
+        if key in self.news_loading:
+            return
+        self.news_loading.add(key)
+        favorite = self.favorite_teams.get(key, "")
+        weeks = self.news_weeks_var.get()
+        api_key = self.agnes_api_key_var.get().strip()
+        free_translate = self.free_translate_var.get()
+        espn_league = str(COMPETITIONS[key]["espn"])
+
+        def worker() -> None:
+            items = self.news_service.fetch(
+                espn_league,
+                weeks=weeks,
+                favorite_team_id=favorite,
+                force=force,
+            )
+            self._post_ui(lambda current=items: self._apply_news(key, current, translating=True))
+            pending: list[NewsItem] = []
+            for item in items:
+                item.translated_title, item.translated_summary = self.news_service.cached_translation(item.id)
+                if item.translated_title:
+                    item_glossary = self._news_glossary(item)
+                    item.translated_title = self._enforce_glossary(item.translated_title, item_glossary)
+                    item.translated_summary = self._enforce_glossary(item.translated_summary, item_glossary)
+                    self.news_service.store_translation(item.id, item.translated_title, item.translated_summary)
+                if not item.translated_title:
+                    pending.append(item)
+            glossary: dict[str, str] = {}
+            for item in pending:
+                glossary.update(self._news_glossary(item))
+            if api_key:
+                for start in range(0, len(pending), 8):
+                    batch = pending[start:start + 8]
+                    try:
+                        translated = self.commentary_service.translate_news_batch(
+                            [{"id": item.id, "title": item.title, "summary": item.summary} for item in batch],
+                            glossary,
+                            api_key,
+                        )
+                    except Exception:
+                        translated = {}
+                    for item in batch:
+                        item.translated_title, item.translated_summary = translated.get(
+                            item.id, ("", "")
+                        )
+                unresolved = [item for item in pending if not item.translated_title]
+                if free_translate and unresolved:
+                    texts = [text for item in unresolved for text in (item.title, item.summary)]
+                    try:
+                        translated_rows = self.free_translation_service.translate_many(texts, glossary)
+                    except Exception:
+                        translated_rows = texts
+                    for index, item in enumerate(unresolved):
+                        item.translated_title = translated_rows[index * 2] if index * 2 < len(translated_rows) else item.title
+                        item.translated_summary = translated_rows[index * 2 + 1] if index * 2 + 1 < len(translated_rows) else item.summary
+            elif free_translate and pending:
+                texts = [text for item in pending for text in (item.title, item.summary)]
+                try:
+                    translated_rows = self.free_translation_service.translate_many(texts, glossary)
+                except Exception:
+                    translated_rows = texts
+                for index, item in enumerate(pending):
+                    item.translated_title = translated_rows[index * 2] if index * 2 < len(translated_rows) else item.title
+                    item.translated_summary = translated_rows[index * 2 + 1] if index * 2 + 1 < len(translated_rows) else item.summary
+            for item in pending:
+                item_glossary = self._news_glossary(item)
+                item.translated_title = self._enforce_glossary(item.translated_title, item_glossary)
+                item.translated_summary = self._enforce_glossary(item.translated_summary, item_glossary)
+                if item.translated_title:
+                    self.news_service.store_translation(item.id, item.translated_title, item.translated_summary)
+            self._post_ui(lambda current=items: self._apply_news(key, current, translating=False))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _news_glossary(self, item: NewsItem) -> dict[str, str]:
+        text = f"{item.title} {item.summary}".casefold()
+        mappings = {
+            **self.localizer.teams_by_name,
+            **self.localizer.players,
+        }
+        return {
+            source: target
+            for source, target in mappings.items()
+            if len(source) >= 3 and source.casefold() in text
+        }
+
+    @staticmethod
+    def _enforce_glossary(text: str, glossary: dict[str, str]) -> str:
+        result = str(text or "")
+        for source, target in sorted(glossary.items(), key=lambda item: len(item[0]), reverse=True):
+            result = re.sub(re.escape(source), target, result, flags=re.IGNORECASE)
+        return result
+
+    def _apply_news(self, key: str, items: list[NewsItem], translating: bool) -> None:
+        self.news_items[key] = items
+        if not translating:
+            self.news_loading.discard(key)
+        self._invalidate_render_cache("news")
+        if self.active_competition_key == key and self.active_tab == "news":
+            self.render_news()
+
+    def _open_news_detail(self, item: NewsItem) -> None:
+        self._prepare_single_popup(clear_history=True)
+        popup = tk.Toplevel(self.root)
+        self.news_popup = popup
+        popup.overrideredirect(True)
+        popup.configure(bg=PANEL)
+        popup.attributes("-topmost", True)
+        popup.attributes("-alpha", 0.98)
+        popup.bind(
+            "<Destroy>",
+            lambda event, current=popup:
+            setattr(self, "news_popup", None)
+            if event.widget is current and self.news_popup is current else None,
+            add="+",
+        )
+        width = min(350, max(286, self.root.winfo_width() - 16))
+        height = min(430, max(330, self.root.winfo_height() - 36))
+        popup.geometry(f"{width}x{height}+{self.root.winfo_x() + 8}+{self.root.winfo_y() + 20}")
+        header = tk.Frame(popup, bg=PANEL, padx=12, pady=10)
+        header.pack(fill="x")
+        title = tk.Label(header, text="资讯详情", bg=PANEL, fg=ACCENT, font=("Microsoft YaHei UI", 11, "bold"))
+        title.pack(side="left")
+        close = tk.Label(header, text="×", bg=PANEL, fg=MUTED, cursor="hand2", font=("Microsoft YaHei UI", 13, "bold"))
+        close.pack(side="right")
+        self._bind_click(close, lambda _event: self._close_news_popup())
+        self._bind_drag(header)
+        body = ScrollFrame(popup, bg=PANEL)
+        body.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        headline = tk.Label(body.body, text=item.translated_title or item.title, bg=PANEL, fg=TEXT, anchor="w", justify="left", font=("Microsoft YaHei UI", 13, "bold"))
+        headline.pack(fill="x")
+        self._bind_wrap(headline, reserve=8, minimum=150, maximum=320)
+        tk.Label(body.body, text=f"{item.published.strftime('%Y-%m-%d %H:%M')} · {item.source}", bg=PANEL, fg=MUTED, anchor="w", font=("Microsoft YaHei UI", 8)).pack(fill="x", pady=(6, 12))
+        summary = tk.Label(body.body, text=item.translated_summary or item.summary or "该资讯暂无摘要，请打开原文查看。", bg=PANEL_2, fg=TEXT, padx=10, pady=10, anchor="nw", justify="left", font=("Microsoft YaHei UI", 9))
+        summary.pack(fill="x")
+        self._bind_wrap(summary, reserve=26, minimum=130, maximum=300)
+        self._text_button(body.body, "打开原文", lambda: webbrowser.open(item.url)).pack(anchor="w", pady=(12, 0))
+        self._apply_fonts_to_tree(popup)
+
     def _select_data_board(self, key: str) -> None:
         self.active_data_board_key = key
         if self.active_tab == "data":
@@ -4382,19 +4733,24 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
     def _load_professional_boards(self, snapshot: Snapshot) -> None:
         key = snapshot.competition_key
-        if key in self.professional_boards_cache or key in self.professional_boards_loading:
+        max_age = self.roster_refresh_hours_var.get() * 3600
+        if (
+            key in self.professional_boards_cache
+            and time.time() - self.professional_boards_loaded_at.get(key, 0) < max_age
+        ) or key in self.professional_boards_loading:
             return
         self.professional_boards_loading.add(key)
         provider = DataProvider(self.provider.cache_dir, key)
         provider.teams = snapshot.teams
         provider.season_year = snapshot.season_year
+        roster_ttl_hours = self.roster_refresh_hours_var.get()
 
         def worker() -> None:
             players: list[tuple[Player, Team]] = []
             for team in snapshot.teams.values():
-                roster, _error = provider.get_roster(team.id, season_year=snapshot.season_year)
+                roster, _error = provider.get_roster(team.id, season_year=snapshot.season_year, ttl_hours=roster_ttl_hours)
                 if not any(player.stats for player in roster) and snapshot.season_year > 2000:
-                    roster, _error = provider.get_roster(team.id, season_year=snapshot.season_year - 1)
+                    roster, _error = provider.get_roster(team.id, season_year=snapshot.season_year - 1, ttl_hours=roster_ttl_hours)
                 players.extend((player, team) for player in roster if player.stats)
             boards = self._professional_boards(players)
             self._post_ui(lambda: self._apply_professional_boards(key, boards))
@@ -4432,6 +4788,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.professional_boards_loading.discard(key)
         if boards:
             self.professional_boards_cache[key] = boards
+            self.professional_boards_loaded_at[key] = time.time()
+            self._request_name_localization(
+                "player",
+                [
+                    row.player_name
+                    for board in boards
+                    for row in board.rows
+                    if self.localizer.player(row.player_name, row.player_id) == row.player_name
+                ],
+            )
             self._invalidate_render_cache("data")
             if self.active_competition_key == key and self.active_tab == "data":
                 self.render_data()
@@ -5686,6 +6052,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.favorite_teams[self.active_competition_key] = team_id
         self._save_config()
         self._invalidate_render_cache("team")
+        self.news_items.pop(self.active_competition_key, None)
+        self._invalidate_render_cache("news")
         if self.active_tab == "team":
             self.render_team()
 
@@ -5720,7 +6088,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             "球员名单",
             "点击球员进入详细数据页面",
         )
-        if team.id not in self.rosters and team.id not in self.loading_rosters and team.id not in self.roster_errors:
+        roster_stale = (
+            team.id in self.rosters
+            and time.time() - self.roster_loaded_at.get(team.id, 0)
+            >= self.roster_refresh_hours_var.get() * 3600
+        )
+        if (
+            (team.id not in self.rosters or roster_stale)
+            and team.id not in self.loading_rosters
+            and team.id not in self.roster_errors
+        ):
             self.loading_rosters.add(team.id)
             self._load_roster_async(team.id)
         if team.id in self.loading_rosters:
@@ -5775,9 +6152,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _load_roster_async(self, team_id: str) -> None:
         competition_key = self.active_competition_key
         provider = self.provider
+        roster_ttl_hours = self.roster_refresh_hours_var.get()
 
         def worker() -> None:
-            players, error = provider.get_roster(team_id)
+            players, error = provider.get_roster(team_id, ttl_hours=roster_ttl_hours)
 
             def apply() -> None:
                 self.loading_rosters.discard(team_id)
@@ -5785,6 +6163,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     self.roster_errors[team_id] = error
                 else:
                     self.rosters[team_id] = players
+                    self.roster_loaded_at[team_id] = time.time()
                     self.roster_errors.pop(team_id, None)
                     self._request_name_localization(
                         "player",
@@ -5869,24 +6248,28 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             and name not in self.name_localization_cache[cache_key]
             and f"{kind}:{name}" not in self.name_localization_loading
         ]
-        if not key or not missing:
+        if not missing or (not key and kind != "player"):
             return
         for name in missing:
             self.name_localization_loading.add(f"{kind}:{name}")
 
         def worker() -> None:
             translated: dict[str, str] = {}
-            try:
-                for start in range(0, len(missing), 60):
-                    translated.update(
-                        self.commentary_service.localize_football_names(
-                            missing[start : start + 60],
-                            kind,
-                            key,
+            if key:
+                try:
+                    for start in range(0, len(missing), 60):
+                        translated.update(
+                            self.commentary_service.localize_football_names(
+                                missing[start : start + 60],
+                                kind,
+                                key,
+                            )
                         )
-                    )
-            except Exception:
-                pass
+                except Exception:
+                    pass
+            if kind == "player":
+                unresolved = [name for name in missing if name not in translated]
+                translated.update(self.wikidata_name_service.localize_players(unresolved))
             self._post_ui(
                 lambda rows=translated:
                 self._apply_name_localization(kind, missing, rows)
@@ -5988,6 +6371,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.club_popup_body = body.body
         self._empty(body.body, "正在加载俱乐部资料…")
+        roster_ttl_hours = self.roster_refresh_hours_var.get()
 
         def worker() -> None:
             provider = DataProvider(
@@ -5999,7 +6383,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             roster: list[Player] = []
             error = ""
             if team is not None:
-                roster, roster_error = provider.get_roster(team.id)
+                roster, roster_error = provider.get_roster(team.id, ttl_hours=roster_ttl_hours)
                 error = roster_error or ""
             else:
                 error = "未在当前联赛赛季中找到该俱乐部。"

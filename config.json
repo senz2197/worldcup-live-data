@@ -32,6 +32,7 @@
   "match_notifications": true,
   "ai_commentary": true,
   "ai_translate_raw": false,
+  "free_translate": true,
   "commentary_lines": 3,
   "tts_enabled": false,
   "tts_voice": "",
@@ -42,6 +43,8 @@
   "window_geometry": "378x593+2164+743",
   "live_refresh_seconds": 5,
   "default_refresh_seconds": 300,
+  "roster_refresh_hours": 24,
+  "news_weeks": 1,
   "ui_font": "Microsoft YaHei UI",
   "score_font": "Bahnschrift SemiBold"
 }
