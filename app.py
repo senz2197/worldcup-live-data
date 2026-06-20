@@ -55,7 +55,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.2.3"
+APP_VERSION = "1.2.4"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -3883,10 +3883,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             "start_y": 0,
             "start_top": 0,
             "moved": False,
+            "watchdog": None,
         }
 
         def stop_drag(_event: tk.Event | None = None) -> str:
             drag_state["active"] = False
+            watchdog = drag_state.get("watchdog")
+            drag_state["watchdog"] = None
+            if watchdog is not None:
+                try:
+                    timeline.after_cancel(watchdog)
+                except tk.TclError:
+                    pass
             try:
                 if timeline.grab_current() == timeline:
                     timeline.grab_release()
@@ -3894,6 +3902,49 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             except tk.TclError:
                 pass
             return "break"
+
+        def pointer_inside(x_root: int, y_root: int) -> bool:
+            try:
+                left = timeline.winfo_rootx()
+                top = timeline.winfo_rooty()
+                return (
+                    left <= x_root < left + timeline.winfo_width()
+                    and top <= y_root < top + timeline.winfo_height()
+                )
+            except tk.TclError:
+                return False
+
+        def left_button_down() -> bool:
+            if sys.platform.startswith("win"):
+                try:
+                    return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+                except Exception:
+                    pass
+            try:
+                return bool(self.root.tk.call("tk", "windowingsystem")) and drag_state["active"]
+            except tk.TclError:
+                return False
+
+        def watch_drag() -> None:
+            drag_state["watchdog"] = None
+            if not drag_state["active"]:
+                return
+            if not left_button_down():
+                stop_drag()
+                return
+            try:
+                x_root = timeline.winfo_pointerx()
+                y_root = timeline.winfo_pointery()
+            except tk.TclError:
+                stop_drag()
+                return
+            if not pointer_inside(x_root, y_root):
+                stop_drag()
+                return
+            try:
+                drag_state["watchdog"] = timeline.after(24, watch_drag)
+            except tk.TclError:
+                stop_drag()
 
         def start_drag(event: tk.Event) -> str:
             drag_state["active"] = True
@@ -3903,6 +3954,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             timeline.selection_clear(0, "end")
             try:
                 timeline.grab_set()
+                drag_state["watchdog"] = timeline.after(24, watch_drag)
             except tk.TclError:
                 drag_state["active"] = False
             return "break"
@@ -3910,6 +3962,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         def drag_text(event: tk.Event) -> str:
             if not drag_state["active"]:
                 return "break"
+            if not pointer_inside(event.x_root, event.y_root):
+                return stop_drag(event)
             delta = event.y_root - drag_state["start_y"]
             if abs(delta) < 3:
                 return "break"
