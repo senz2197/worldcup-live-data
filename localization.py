@@ -145,6 +145,17 @@ BOARD_NAMES = {
     "teamWins": "胜场榜",
     "teamDefense": "防守榜",
     "teamPlayed": "比赛场次",
+    "appearancesLeaders": "出场榜",
+    "startsLeaders": "首发榜",
+    "shotsLeaders": "射门榜",
+    "shotsOnTargetLeaders": "射正榜",
+    "conversionLeaders": "射门转化率",
+    "foulsLeaders": "犯规榜",
+    "fouledLeaders": "被犯规榜",
+    "offsidesLeaders": "越位榜",
+    "yellowCardsLeaders": "黄牌榜",
+    "redCardsLeaders": "红牌榜",
+    "savesLeaders": "扑救榜",
 }
 
 

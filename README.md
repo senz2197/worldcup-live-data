@@ -20,12 +20,14 @@ WorldCupFloat_Portable.zip
 - System tray menu as a backup control entry
 - Drag inside the content area to scroll; no visible side scrollbar
 - Competition switcher for the World Cup, Premier League, La Liga, Bundesliga, Serie A, and Ligue 1
+- Configurable centered or left-aligned title, with sync status directly below it
 - Live matches with scores and team logos
 - Upcoming fixtures grouped by the current or next round
 - Completed results defaulting to the current round, with previous/next and all-results controls
 - Group standings with GP/W/D/L/GF/GA/GD/PTS
 - League tables and World Cup knockout bracket placeholders
 - Competition-specific statistical leaderboards
+- Professional league leaderboards for goals, assists, goal contributions, appearances, starts, shots, shots on target, conversion, fouls, cards, offsides, and saves
 - Favorite team support for every competition
 - Team workflow: click any team logo or name to view team form, results, roster, and detailed player data
 - World Cup player profiles include their club, with direct links into supported European league club cards
@@ -39,6 +41,8 @@ WorldCupFloat_Portable.zip
 - One-click GitHub update that preserves the current local configuration
 - ESPN play-by-play commentary shown directly below each live score card
 - Chinese AI commentary with raw-data and translation modes
+- Optional offline Windows text-to-speech for live Chinese commentary, using installed system voices
+- Official rights-holder links for live matches and fixtures starting within five minutes
 - Full match commentary timelines and cached AI post-match summaries
 
 ## Data Sources
@@ -89,6 +93,10 @@ The portable package includes the EXE, assets, configuration, and current cache.
 AI API keys are stored only in the local `secrets.json` file. This file is
 excluded from Git and release packages. Without a key, commentary automatically
 falls back to the original ESPN play-by-play text.
+
+Live buttons only open official broadcaster or official broadcaster-lookup
+pages. The project does not discover, proxy, embed, or redistribute match
+video streams.
 
 ## Smoke Test
 

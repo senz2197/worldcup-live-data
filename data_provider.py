@@ -413,16 +413,22 @@ class DataProvider:
         self.last_snapshot = snapshot
         return snapshot
 
-    def get_roster(self, team_id: str, force: bool = False) -> tuple[list[Player], str | None]:
+    def get_roster(
+        self,
+        team_id: str,
+        force: bool = False,
+        season_year: int | None = None,
+    ) -> tuple[list[Player], str | None]:
         if not team_id or team_id not in self.teams:
             return [], "没有找到可用的球队 ID。"
         team = self.teams[team_id]
         if team.source != "espn":
             return [], "当前备用数据源没有球员名单接口。"
         try:
+            season = int(season_year or self.season_year)
             data = self.fetch_json(
-                self._site_url(f"teams/{team_id}/roster"),
-                self._cache_name(f"roster_{safe_filename(team_id)}"),
+                self._site_url(f"teams/{team_id}/roster?season={season}"),
+                self._cache_name(f"roster_{season}_{safe_filename(team_id)}"),
                 ttl_seconds=6 * 3600,
                 force=force,
             )

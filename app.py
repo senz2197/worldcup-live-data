@@ -9,13 +9,14 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import traceback
 import urllib.request
 import webbrowser
 import weakref
 import zipfile
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import colorchooser, ttk
 import tkinter as tk
@@ -24,6 +25,7 @@ import tkinter.font as tkfont
 from commentary_service import CommentaryService
 from data_provider import COMPETITIONS, CommentaryEntry, DataProvider, LeaderRow, Leaderboard, Match, MatchTeam, Player, Snapshot, Team
 from localization import NameLocalizer
+from speech_service import SpeechService
 
 
 try:
@@ -56,7 +58,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -64,7 +66,7 @@ GITHUB_LATEST_DOWNLOAD_URL = (
 )
 PALETTE_PRESETS = {
     "codex": {
-        "label": "Codex 深色",
+        "label": "深海青墨",
         "BG": "#0b0f14",
         "PANEL": "#111820",
         "PANEL_2": "#17212b",
@@ -232,6 +234,32 @@ PLAYER_STAT_LABELS = {
     "SHF": "被射正",
     "GA": "失球",
     "value": "数值",
+}
+
+PROFESSIONAL_BOARD_DEFS = [
+    ("goalsLeaders", "射手榜", "G", True, " 球"),
+    ("assistsLeaders", "助攻榜", "A", True, " 助"),
+    ("goalContributions", "参与进球", "GA_TOTAL", True, " 次"),
+    ("appearancesLeaders", "出场榜", "APP", True, " 场"),
+    ("startsLeaders", "首发榜", "STARTS", True, " 场"),
+    ("shotsLeaders", "射门榜", "SHOT", True, " 次"),
+    ("shotsOnTargetLeaders", "射正榜", "SOG", True, " 次"),
+    ("conversionLeaders", "射门转化率", "CONVERSION", True, "%"),
+    ("foulsLeaders", "犯规榜", "FC", True, " 次"),
+    ("fouledLeaders", "被犯规榜", "FA", True, " 次"),
+    ("offsidesLeaders", "越位榜", "OF", True, " 次"),
+    ("yellowCardsLeaders", "黄牌榜", "YC", True, " 张"),
+    ("redCardsLeaders", "红牌榜", "RC", True, " 张"),
+    ("savesLeaders", "扑救榜", "SV", True, " 次"),
+]
+
+OFFICIAL_LIVE_TARGETS = {
+    "worldcup": [("央视体育", "https://sports.cctv.com/"), ("CCTV-5", "https://tv.cctv.com/live/cctv5/")],
+    "premier_league": [("咪咕视频", "https://www.miguvideo.com/p/sports/")],
+    "laliga": [("咪咕视频", "https://www.miguvideo.com/p/sports/")],
+    "bundesliga": [("德甲官方转播查询", "https://www.bundesliga.com/en/bundesliga/info/broadcasters")],
+    "serie_a": [("咪咕视频", "https://www.miguvideo.com/p/sports/")],
+    "ligue_1": [("咪咕视频", "https://www.miguvideo.com/p/sports/")],
 }
 
 
@@ -636,6 +664,7 @@ class WorldCupFloatApp:
             competition_key=self.active_competition_key
         )
         self.commentary_service = CommentaryService(self.provider.cache_dir)
+        self.speech_service = SpeechService()
         self.ai_prewarm_running = False
         self.ai_prewarm_scheduled = False
         self.ai_prewarm_suppressed = False
@@ -710,6 +739,7 @@ class WorldCupFloatApp:
         self.player_popup_player_id = ""
         self.club_popup: tk.Toplevel | None = None
         self.club_popup_body: tk.Widget | None = None
+        self.club_source_player: Player | None = None
         self.match_popup: tk.Toplevel | None = None
         self.match_popup_match_id = ""
         self.match_popup_opening = False
@@ -721,9 +751,11 @@ class WorldCupFloatApp:
         self.pointer_origin = (0, 0)
         self.pointer_dragged = False
         self.popups_at_pointer_press: list[tk.Toplevel] = []
+        self.popup_back_stack: list = []
         self.resize_origin = (0, 0, 0, 0)
         self.title_label: tk.Label | None = None
         self.status_label: tk.Label | None = None
+        self.competition_button: tk.Label | None = None
         self.quick_refresh_button: tk.Label | None = None
         self.tab_bar: tk.Frame | None = None
         self.tab_button_order: list[str] = []
@@ -742,16 +774,27 @@ class WorldCupFloatApp:
         self.root.after(400, self._sync_shell_icon)
 
         self.status_var = tk.StringVar(value="准备同步赛事数据")
+        self.last_status_text = "准备同步赛事数据"
         self.team_var = tk.StringVar(value="全部球队")
         self.alpha_var = tk.DoubleVar(value=float(self.config.get("alpha", 0.93)))
         self.topmost_var = tk.BooleanVar(value=bool(self.config.get("topmost", True)))
         self.use_english_var = tk.BooleanVar(value=bool(self.config.get("use_english", False)))
         self.quick_refresh_var = tk.BooleanVar(value=bool(self.config.get("quick_refresh", False)))
         self.show_status_var = tk.BooleanVar(value=bool(self.config.get("show_status", False)))
+        self.title_alignment_var = tk.StringVar(
+            value="left" if self.config.get("title_alignment") == "left" else "center"
+        )
         self.match_notifications_var = tk.BooleanVar(value=bool(self.config.get("match_notifications", True)))
         self.ai_commentary_var = tk.BooleanVar(value=bool(self.config.get("ai_commentary", True)))
         self.ai_translate_raw_var = tk.BooleanVar(value=bool(self.config.get("ai_translate_raw", False)))
         self.commentary_lines_var = tk.IntVar(value=self._valid_commentary_lines(self.config.get("commentary_lines"), 3))
+        self.tts_enabled_var = tk.BooleanVar(value=bool(self.config.get("tts_enabled", False)))
+        self.tts_voice_var = tk.StringVar(value=str(self.config.get("tts_voice") or ""))
+        self.tts_rate_var = tk.IntVar(value=int(self.config.get("tts_rate") or 185))
+        self.speech_voices = self.speech_service.voices()
+        self.spoken_commentary_sequences: dict[str, int] = {}
+        self.professional_boards_cache: dict[str, list[Leaderboard]] = {}
+        self.professional_boards_loading: set[str] = set()
         self.agnes_api_key_var = tk.StringVar(value=str(self.secrets.get("agnes_api_key") or ""))
         self.ai_status_var = tk.StringVar(value="AI 已启用" if self.agnes_api_key_var.get().strip() else "未设置 API Key，将显示原始数据")
         self.ai_cache_status_var = tk.StringVar(value=self._ai_cache_status_text())
@@ -770,7 +813,8 @@ class WorldCupFloatApp:
         self._start_tray_icon()
         self.root.after(50, self._mark_as_tool_window)
         self.refresh_data(force=False, quiet=False)
-        self.root.after(self._current_refresh_ms(), self._auto_refresh)
+        self.auto_refresh_after_id: str | None = None
+        self._schedule_next_refresh()
         self.root.after(60 * 60 * 1000, self._maintain_ai_cache)
 
     def run(self) -> None:
@@ -873,10 +917,14 @@ class WorldCupFloatApp:
                         "custom_palette": palette,
                         "quick_refresh": bool(self.quick_refresh_var.get()) if hasattr(self, "quick_refresh_var") else False,
                         "show_status": bool(self.show_status_var.get()) if hasattr(self, "show_status_var") else False,
+                        "title_alignment": self.title_alignment_var.get() if hasattr(self, "title_alignment_var") else "center",
                         "match_notifications": bool(self.match_notifications_var.get()) if hasattr(self, "match_notifications_var") else True,
                         "ai_commentary": bool(self.ai_commentary_var.get()) if hasattr(self, "ai_commentary_var") else True,
                         "ai_translate_raw": bool(self.ai_translate_raw_var.get()) if hasattr(self, "ai_translate_raw_var") else False,
                         "commentary_lines": self._valid_commentary_lines(self.commentary_lines_var.get(), 3) if hasattr(self, "commentary_lines_var") else 3,
+                        "tts_enabled": bool(self.tts_enabled_var.get()) if hasattr(self, "tts_enabled_var") else False,
+                        "tts_voice": self.tts_voice_var.get() if hasattr(self, "tts_voice_var") else "",
+                        "tts_rate": max(120, min(260, int(self.tts_rate_var.get()))) if hasattr(self, "tts_rate_var") else 185,
                         "topmost": bool(self.topmost_var.get()) if hasattr(self, "topmost_var") else True,
                         "use_english": bool(self.use_english_var.get()) if hasattr(self, "use_english_var") else False,
                         "alpha": round(float(self.alpha_var.get()), 2) if hasattr(self, "alpha_var") else 0.93,
@@ -1187,6 +1235,20 @@ class WorldCupFloatApp:
             self.status_var.set("")
         self._apply_status_visibility()
 
+    def _set_title_alignment(self, value: str) -> None:
+        self.title_alignment_var.set("left" if value == "left" else "center")
+        self._apply_title_alignment()
+        self._save_config()
+
+    def _apply_title_alignment(self) -> None:
+        if self.title_label is None or self.status_label is None:
+            return
+        centered = self.title_alignment_var.get() != "left"
+        anchor = "center" if centered else "w"
+        justify = "center" if centered else "left"
+        self.title_label.configure(anchor=anchor, justify=justify)
+        self.status_label.configure(anchor=anchor, justify=justify)
+
     def _toggle_match_notifications(self) -> None:
         self._save_config()
         if not self.match_notifications_var.get():
@@ -1208,14 +1270,22 @@ class WorldCupFloatApp:
         if self.status_label is None:
             return
         if self.show_status_var.get():
+            self.status_var.set(self.last_status_text)
             if not self.status_label.winfo_manager():
-                self.status_label.pack(anchor="w", pady=(2, 0))
+                self.status_label.pack(fill="x", pady=(2, 0))
         else:
             self.status_label.pack_forget()
 
     def _save_refresh_settings(self, *_args) -> None:
         self.live_refresh_seconds_var.set(self._valid_seconds(self.live_refresh_seconds_var.get(), 5))
         self.default_refresh_seconds_var.set(self._valid_seconds(self.default_refresh_seconds_var.get(), 300))
+        self._save_config()
+        self._schedule_next_refresh()
+
+    def _save_tts_settings(self, *_args) -> None:
+        self.tts_rate_var.set(max(120, min(260, int(self.tts_rate_var.get() or 185))))
+        if not self.tts_enabled_var.get():
+            self.speech_service.stop()
         self._save_config()
 
     def _save_commentary_settings(self, *_args) -> None:
@@ -1267,6 +1337,7 @@ class WorldCupFloatApp:
         if self.api_help_popup is not None and self.api_help_popup.winfo_exists():
             self.api_help_popup.lift()
             return
+        self._prepare_single_popup(back_action=self.open_settings)
         popup = tk.Toplevel(self.root)
         self.api_help_popup = popup
         popup.overrideredirect(True)
@@ -1311,7 +1382,7 @@ class WorldCupFloatApp:
             font=("Microsoft YaHei UI", 13, "bold"),
         )
         close.pack(side="right")
-        self._bind_click(close, lambda _event: self._close_api_help())
+        self._bind_click(close, lambda _event: self._close_and_restore(self._close_api_help))
         self._bind_drag(header)
         self._bind_drag(title)
 
@@ -1569,6 +1640,7 @@ Get-ChildItem -LiteralPath $source | ForEach-Object {
         Copy-Item -LiteralPath $_.FullName -Destination $TargetDirectory -Recurse -Force
     }
 }
+
 Start-Process -FilePath (Join-Path $TargetDirectory $ExecutableName) -WorkingDirectory $TargetDirectory
 Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
@@ -1950,7 +2022,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             fg=TEXT,
             font=("Microsoft YaHei UI", 17, "bold"),
         )
-        title_label.pack(side="left", anchor="w", fill="x", expand=True)
+        title_label.pack(fill="x")
         competition_button = tk.Label(
             title_box,
             text="▾",
@@ -1961,12 +2033,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             pady=1,
             font=("Microsoft YaHei UI", 10, "bold"),
         )
-        competition_button.pack(side="right", anchor="n", pady=(4, 0))
+        competition_button.place(relx=1.0, x=-1, y=4, anchor="ne")
         self._bind_click(
             competition_button,
             lambda _event: self._open_competition_popup(),
         )
         self.title_label = title_label
+        self.competition_button = competition_button
         self._bind_wrap(title_label, reserve=34, minimum=120, maximum=260)
         status_label = tk.Label(
             title_box,
@@ -1979,6 +2052,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.status_label = status_label
         self._bind_wrap(status_label, reserve=12, minimum=120, maximum=260)
         self._apply_status_visibility()
+        self._apply_title_alignment()
         self._apply_quick_refresh_visibility()
         for widget in (header, title_label, status_label):
             self._bind_drag(widget)
@@ -2075,6 +2149,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         ):
             self._close_competition_popup()
             return
+        self._prepare_single_popup(clear_history=True)
         popup = tk.Toplevel(self.root)
         self.competition_popup = popup
         popup.overrideredirect(True)
@@ -2308,6 +2383,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         except tk.TclError:
             clicked_main = False
         if clicked_main:
+            self.popup_back_stack.clear()
             self._close_popups(self.popups_at_pointer_press)
         self.popups_at_pointer_press = []
 
@@ -2348,6 +2424,19 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
     def _close_all_popups(self) -> None:
         self._close_popups(self._existing_popups())
+
+    def _prepare_single_popup(self, back_action=None, clear_history: bool = False) -> None:
+        if clear_history:
+            self.popup_back_stack.clear()
+        self._close_all_popups()
+        if back_action is not None:
+            self.popup_back_stack.append(back_action)
+
+    def _close_and_restore(self, close_action) -> None:
+        close_action()
+        if self.popup_back_stack:
+            action = self.popup_back_stack.pop()
+            self.root.after(40, action)
 
     def _bind_click(self, widget: tk.Widget, command, add: str = "+") -> None:
         state = {"origin": (0, 0), "dragged": False}
@@ -2427,6 +2516,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.show_window()
 
     def exit_app(self) -> None:
+        self.speech_service.stop()
         self._save_config()
         try:
             if self.tray_icon is not None:
@@ -2492,6 +2582,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.settings_popup.deiconify()
             self.settings_popup.lift()
             return
+        self._prepare_single_popup(clear_history=True)
         popup = tk.Toplevel(self.root)
         popup.overrideredirect(True)
         popup.configure(bg=PANEL)
@@ -2549,6 +2640,29 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         title_entry.bind("<Return>", lambda _event: self._apply_title())
         title_entry.bind("<FocusOut>", lambda _event: self._apply_title())
         self._text_button(title_row, "应用", self._apply_title).pack(side="left", padx=(8, 0))
+        align_row = tk.Frame(body, bg=PANEL)
+        align_row.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            align_row,
+            text="标题位置",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9),
+        ).pack(side="left")
+        for text, value in (("居中", "center"), ("贴左", "left")):
+            active = self.title_alignment_var.get() == value
+            button = tk.Label(
+                align_row,
+                text=text,
+                bg=PANEL_3 if active else PANEL_2,
+                fg=ACCENT if active else MUTED,
+                padx=12,
+                pady=5,
+                cursor="hand2",
+                font=("Microsoft YaHei UI", 8, "bold"),
+            )
+            button.pack(side="right", padx=(6, 0))
+            self._bind_click(button, lambda _event, current=value: self._set_title_alignment(current))
 
         tk.Label(body, text="字体", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
         font_panel = tk.Frame(body, bg=PANEL_2, padx=9, pady=7, highlightthickness=1, highlightbackground=LINE)
@@ -2827,6 +2941,42 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         help_link.pack(fill="x", pady=(8, 0))
         self._bind_click(help_link, lambda _event: self._open_api_help())
 
+        tk.Label(commentary_panel, text="语音播报", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(10, 3))
+        tk.Checkbutton(
+            commentary_panel,
+            text="实时播报 AI 中文解说",
+            variable=self.tts_enabled_var,
+            command=self._save_tts_settings,
+            bg=PANEL_2,
+            fg=TEXT,
+            selectcolor=PANEL_3,
+            activebackground=PANEL_2,
+            activeforeground=TEXT,
+        ).pack(anchor="w")
+        voice_names = ["系统默认"] + [voice.name for voice in self.speech_voices]
+        voice_ids = {"系统默认": "", **{voice.name: voice.id for voice in self.speech_voices}}
+        selected_voice_name = next(
+            (voice.name for voice in self.speech_voices if voice.id == self.tts_voice_var.get()),
+            "系统默认",
+        )
+        voice_name_var = tk.StringVar(value=selected_voice_name)
+        voice_combo = ttk.Combobox(
+            commentary_panel,
+            textvariable=voice_name_var,
+            values=voice_names,
+            state="readonly",
+            style="WorldCup.TCombobox",
+        )
+        voice_combo.pack(fill="x", pady=(5, 0))
+        voice_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _event: (
+                self.tts_voice_var.set(voice_ids.get(voice_name_var.get(), "")),
+                self._save_tts_settings(),
+            ),
+        )
+        voice_combo.bind("<MouseWheel>", scroll_settings)
+
         tk.Label(body, text="AI 缓存", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9)).pack(anchor="w")
         cache_panel = tk.Frame(body, bg=PANEL_2, padx=9, pady=8, highlightthickness=1, highlightbackground=LINE)
         cache_panel.pack(fill="x", pady=(3, 10))
@@ -2973,16 +3123,32 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
     def _auto_refresh(self) -> None:
         self.refresh_data(force=False, quiet=True)
-        self.root.after(self._current_refresh_ms(), self._auto_refresh)
+        self._schedule_next_refresh()
 
     def _current_refresh_ms(self) -> int:
         seconds = self.live_refresh_seconds_var.get() if self._has_live_matches() else self.default_refresh_seconds_var.get()
         return self._valid_seconds(seconds, AUTO_REFRESH_MS // 1000) * 1000
 
+    def _schedule_next_refresh(self) -> None:
+        if self.auto_refresh_after_id is not None:
+            try:
+                self.root.after_cancel(self.auto_refresh_after_id)
+            except tk.TclError:
+                pass
+        if self._has_live_matches():
+            delay = self._current_refresh_ms()
+        else:
+            seconds = self._valid_seconds(self.default_refresh_seconds_var.get(), 300)
+            now = time.time()
+            next_boundary = (int(now // seconds) + 1) * seconds
+            delay = max(1000, int((next_boundary - now) * 1000))
+        self.auto_refresh_after_id = self.root.after(delay, self._auto_refresh)
+
     def _has_live_matches(self) -> bool:
         return bool(self.snapshot and any(match.is_live for match in self.snapshot.matches))
 
     def _set_status_text(self, text: str) -> None:
+        self.last_status_text = text
         if self.show_status_var.get():
             self.status_var.set(text)
         else:
@@ -3064,6 +3230,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             ],
         )
         self._refresh_live_commentary(snapshot)
+        if snapshot.competition_kind == "league":
+            self._load_professional_boards(snapshot)
         self._schedule_recent_ai_prewarm(snapshot)
         current_live_ids = {match.id for match in snapshot.matches if match.is_live}
         ended_ids = previous_live_ids - current_live_ids
@@ -3393,6 +3561,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.commentary_errors.pop(match.id, None)
         self._update_commentary_labels(match.id)
         self._render_detail_commentary(match)
+        self._speak_new_commentary(match)
 
     def _apply_commentary_result(
         self,
@@ -3441,6 +3610,30 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 latest_match,
                 request_summary=latest_match.completed,
             )
+
+    def _speak_new_commentary(self, match: Match) -> None:
+        if not self.tts_enabled_var.get() or not match.is_live:
+            return
+        entries = [
+            entry for entry in self.commentary_entries.get(match.id, [])
+            if self._commentary_text(match.id, entry)
+        ]
+        if not entries:
+            return
+        entries.sort(key=lambda entry: entry.sequence)
+        previous = self.spoken_commentary_sequences.get(match.id)
+        if previous is None:
+            pending = entries[-1:]
+        else:
+            pending = [entry for entry in entries if entry.sequence > previous]
+        for entry in pending[-3:]:
+            text = self._commentary_line(match.id, entry, limit=180)
+            self.speech_service.speak(
+                f"{self._team_text(match.home)}对阵{self._team_text(match.away)}。{text}",
+                self.tts_voice_var.get(),
+                self.tts_rate_var.get(),
+            )
+        self.spoken_commentary_sequences[match.id] = entries[-1].sequence
 
     def _load_complete_detail_commentary(
         self,
@@ -4088,7 +4281,12 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         snapshot = snapshot or self.snapshot
         if not snapshot:
             return []
-        boards = list(snapshot.leaderboards)
+        boards = list(
+            self.professional_boards_cache.get(
+                snapshot.competition_key,
+                snapshot.leaderboards,
+            )
+        )
         goals_board = next((board for board in boards if board.key == "goalsLeaders"), None)
         assists_board = next((board for board in boards if board.key == "assistsLeaders"), None)
         combined: dict[str, LeaderRow] = {}
@@ -4124,7 +4322,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         contribution_rows.sort(key=lambda row: (-self._stat_int(row.stats, "G") - self._stat_int(row.stats, "A"), -self._stat_int(row.stats, "G"), row.player_name))
         for index, row in enumerate(contribution_rows, start=1):
             row.rank = index
-        if contribution_rows:
+        if contribution_rows and not any(board.key == "goalContributions" for board in boards):
             boards.append(Leaderboard("goalContributions", "Goal Contributions", contribution_rows[:50]))
 
         team_rows: list[tuple[str, str, str]] = []
@@ -4181,6 +4379,62 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             boards.append(defense)
             boards.append(team_board("teamPlayed", "Matches Played", "场"))
         return [board for board in boards if board.rows]
+
+    def _load_professional_boards(self, snapshot: Snapshot) -> None:
+        key = snapshot.competition_key
+        if key in self.professional_boards_cache or key in self.professional_boards_loading:
+            return
+        self.professional_boards_loading.add(key)
+        provider = DataProvider(self.provider.cache_dir, key)
+        provider.teams = snapshot.teams
+        provider.season_year = snapshot.season_year
+
+        def worker() -> None:
+            players: list[tuple[Player, Team]] = []
+            for team in snapshot.teams.values():
+                roster, _error = provider.get_roster(team.id, season_year=snapshot.season_year)
+                if not any(player.stats for player in roster) and snapshot.season_year > 2000:
+                    roster, _error = provider.get_roster(team.id, season_year=snapshot.season_year - 1)
+                players.extend((player, team) for player in roster if player.stats)
+            boards = self._professional_boards(players)
+            self._post_ui(lambda: self._apply_professional_boards(key, boards))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _professional_boards(self, players: list[tuple[Player, Team]]) -> list[Leaderboard]:
+        boards: list[Leaderboard] = []
+        for key, name, stat_key, descending, suffix in PROFESSIONAL_BOARD_DEFS:
+            rows: list[LeaderRow] = []
+            for player, team in players:
+                goals = self._stat_int(player.stats, "G")
+                assists = self._stat_int(player.stats, "A")
+                shots = self._stat_int(player.stats, "SHOT")
+                if stat_key == "GA_TOTAL":
+                    value = goals + assists
+                elif stat_key == "STARTS":
+                    value = max(0, self._stat_int(player.stats, "APP") - self._stat_int(player.stats, "SUB"))
+                elif stat_key == "CONVERSION":
+                    value = round(goals * 100 / shots, 1) if shots >= 5 else 0
+                else:
+                    value = self._stat_int(player.stats, stat_key)
+                if value <= 0:
+                    continue
+                display = f"{value:g}{suffix}" if isinstance(value, float) else f"{value}{suffix}"
+                rows.append(LeaderRow(0, player.id, player.name, team.id, team.name, team.abbreviation, team.logo, display, {**player.stats, "value": str(value)}))
+            rows.sort(key=lambda row: (-float(row.stats.get("value", 0)), row.player_name) if descending else (float(row.stats.get("value", 0)), row.player_name))
+            for index, row in enumerate(rows[:50], 1):
+                row.rank = index
+            if rows:
+                boards.append(Leaderboard(key, name, rows[:50]))
+        return boards
+
+    def _apply_professional_boards(self, key: str, boards: list[Leaderboard]) -> None:
+        self.professional_boards_loading.discard(key)
+        if boards:
+            self.professional_boards_cache[key] = boards
+            self._invalidate_render_cache("data")
+            if self.active_competition_key == key and self.active_tab == "data":
+                self.render_data()
 
     def _stat_int(self, stats: dict[str, str], key: str) -> int:
         try:
@@ -4305,14 +4559,22 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _spotlight_matches(self, snapshot: Snapshot | None = None) -> tuple[str, str, list[Match]]:
         matches = self._filtered_matches(snapshot)
         live = [m for m in matches if m.is_live]
+        now = datetime.now().astimezone()
+        imminent = [
+            match for match in matches
+            if match.is_upcoming
+            and match.date is not None
+            and timedelta(0) <= match.date - now <= timedelta(minutes=5)
+        ]
         if live:
             buckets = {self._time_bucket(match) for match in live}
-            spotlight = [
-                match for match in matches
-                if self._time_bucket(match) in buckets and (match.is_live or match.completed)
-            ]
+            spotlight = [match for match in matches if self._time_bucket(match) in buckets and (match.is_live or match.completed)]
+            spotlight.extend(match for match in imminent if match not in spotlight)
             spotlight.sort(key=lambda match: (match.date or MAX_DATE, match.id))
-            return "live", "正在进行的比赛", spotlight
+            return "live", "正在进行与即将开始", spotlight
+        if imminent:
+            imminent.sort(key=lambda match: (match.date or MAX_DATE, match.id))
+            return "imminent", "五分钟内开赛", imminent
 
         completed = [m for m in matches if m.completed]
         completed.sort(key=lambda match: match.date or MIN_DATE, reverse=True)
@@ -4504,8 +4766,53 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._bind_match_open(card, match)
         self._bind_match_open(layout, match)
         self._bind_match_open(scoreline_label, match)
+        live_target = self._official_live_target(match)
+        if live_target is not None:
+            platform, _url = live_target
+            live_button = tk.Label(
+                card,
+                text=f"▶ 直播 · {platform}",
+                bg=PANEL_2,
+                fg=ACCENT,
+                cursor="hand2",
+                padx=8,
+                pady=5,
+                font=("Microsoft YaHei UI", 8, "bold"),
+            )
+            live_button.pack(anchor="e", pady=(8, 0))
+            self._bind_click(live_button, lambda _event, current=match: self._open_official_live(current))
         if match.is_live:
             self._commentary_preview(parent, match)
+
+    def _official_live_target(self, match: Match) -> tuple[str, str] | None:
+        targets = OFFICIAL_LIVE_TARGETS.get(match.competition_key or self.active_competition_key, [])
+        if match.is_live:
+            return targets[0] if targets else None
+        if not match.is_upcoming or match.date is None:
+            return None
+        delta = match.date - datetime.now().astimezone()
+        if timedelta(0) <= delta <= timedelta(minutes=5):
+            return targets[0] if targets else None
+        return None
+
+    def _open_official_live(self, match: Match) -> None:
+        if self._official_live_target(match) is None:
+            return
+        targets = OFFICIAL_LIVE_TARGETS.get(match.competition_key or self.active_competition_key, [])
+
+        def worker() -> None:
+            for _platform, url in targets:
+                try:
+                    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(request, timeout=6) as response:
+                        if 200 <= response.status < 400:
+                            webbrowser.open(url)
+                            return
+                except Exception:
+                    continue
+            self._post_ui(lambda: self._set_status_text("官方直播入口暂时无法连接"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _bind_match_open(self, widget: tk.Widget, match: Match) -> None:
         widget.configure(cursor="hand2")
@@ -4568,6 +4875,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._show_match_notification(matches)
 
     def _show_match_notification(self, matches: list[Match]) -> None:
+        if any(popup is not self.match_notification_popup for popup in self._existing_popups()):
+            return
         self._close_match_notification()
         popup = tk.Toplevel(self.root)
         self.match_notification_popup = popup
@@ -4678,6 +4987,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if self.match_popup is not None and self.match_popup.winfo_exists():
             self._close_match_popup()
             return
+        self._prepare_single_popup(clear_history=True)
         self.match_popup_opening = True
         self.root.after_idle(lambda: setattr(self, "match_popup_opening", False))
         popup = tk.Toplevel(self.root)
@@ -4749,6 +5059,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             value_label = tk.Label(row, text=value, bg=PANEL_2, fg=TEXT, anchor="w", justify="left", font=("Microsoft YaHei UI", 9, "bold"))
             value_label.pack(side="left", fill="x", expand=True)
             self._bind_wrap(value_label, reserve=56, minimum=130, maximum=260)
+        live_target = self._official_live_target(match)
+        live_row = tk.Frame(box, bg=PANEL_2, padx=9, pady=7)
+        live_row.pack(fill="x", pady=3)
+        tk.Label(live_row, text="直播", bg=PANEL_2, fg=MUTED, width=5, anchor="w", font=("Microsoft YaHei UI", 8, "bold")).pack(side="left")
+        if live_target is None:
+            tk.Label(live_row, text="暂无匹配的官方直播入口", bg=PANEL_2, fg=MUTED, anchor="w", font=("Microsoft YaHei UI", 9)).pack(side="left", fill="x", expand=True)
+        else:
+            platform, _url = live_target
+            button = tk.Label(live_row, text=f"▶ 前往 {platform}", bg=PANEL_3, fg=ACCENT, cursor="hand2", padx=8, pady=4, font=("Microsoft YaHei UI", 8, "bold"))
+            button.pack(side="left")
+            self._bind_click(button, lambda _event, current=match: self._open_official_live(current))
         self._match_events_panel(parent, match)
         self._match_stats_panel(parent, match)
         self._match_commentary_panel(parent, match)
@@ -5492,8 +5813,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if self.active_tab == "team":
             self.render_team()
 
-    def _open_player_detail(self, player: Player) -> None:
-        self._close_player_popup()
+    def _open_player_detail(self, player: Player, back_action=None) -> None:
+        self._prepare_single_popup(back_action=back_action, clear_history=back_action is None)
         popup = tk.Toplevel(self.root)
         self.player_popup = popup
         self.player_popup_player_id = player.id
@@ -5517,7 +5838,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         title.pack(side="left")
         close = tk.Label(header, text="×", bg=PANEL, fg=MUTED, cursor="hand2", font=("Microsoft YaHei UI", 13, "bold"))
         close.pack(side="right")
-        self._bind_click(close, lambda _event: self._close_player_popup())
+        self._bind_click(close, lambda _event: self._close_and_restore(self._close_player_popup))
         self._bind_drag(header)
         self._bind_drag(title)
         body = ScrollFrame(popup, bg=PANEL)
@@ -5612,13 +5933,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._player_detail(self.player_popup_body, player)
         self._apply_fonts_to_tree(self.player_popup)
 
-    def _open_external_club(self, player: Player) -> None:
+    def _open_external_club(self, player: Player, back_action=None, restore_only: bool = False) -> None:
         if (
             not player.club_competition_key
             or not player.club_team_id
         ):
             return
-        self._close_club_popup()
+        if back_action is None and not restore_only:
+            back_action = lambda current=player: self._open_player_detail(current)
+        self._prepare_single_popup(back_action=back_action)
+        self.club_source_player = player
         popup = tk.Toplevel(self.root)
         self.club_popup = popup
         popup.overrideredirect(True)
@@ -5657,7 +5981,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             font=("Microsoft YaHei UI", 13, "bold"),
         )
         close.pack(side="right")
-        self._bind_click(close, lambda _event: self._close_club_popup())
+        self._bind_click(close, lambda _event: self._close_and_restore(self._close_club_popup))
         self._bind_drag(header)
         self._bind_drag(title)
         body = ScrollFrame(popup, bg=PANEL)
@@ -5844,8 +6168,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             for widget in (row, label):
                 self._bind_click(
                     widget,
-                    lambda _event, selected=current:
-                    self._open_player_detail(selected),
+                    lambda _event, selected=current, source=self.club_source_player:
+                    self._open_player_detail(
+                        selected,
+                        back_action=(
+                            (lambda current_source=source: self._open_external_club(current_source, restore_only=True))
+                            if source is not None else None
+                        ),
+                    ),
                 )
         self._apply_fonts_to_tree(self.club_popup)
 
