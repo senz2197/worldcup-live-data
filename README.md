@@ -44,6 +44,9 @@ WorldCupFloat_Portable.zip
 - One-click GitHub update that preserves the current local configuration
 - ESPN play-by-play commentary shown directly below each live score card
 - Chinese AI commentary with raw-data and translation modes
+- Selectable AI presets for Agnes `agnes-2.0-flash` and Zhipu `glm-4.7-flash`, with Agnes retained as the default
+- Separate locally persisted API keys per AI provider prevent model switches from overwriting credentials
+- MyMemory remains the primary free translation service; optional Tencent Cloud Machine Translation takes over only when MyMemory fails or is rate-limited
 - Microsoft Edge online neural voices for more natural live Chinese commentary
 - Sports-focused Yunjian is the default voice, with Xiaoxiao, Yunyang, Yunxi, and Xiaoyi available in settings
 - Windows OneCore and legacy SAPI voices remain automatic offline fallbacks

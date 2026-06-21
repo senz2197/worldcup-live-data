@@ -24,7 +24,12 @@ from tkinter import colorchooser, ttk
 import tkinter as tk
 import tkinter.font as tkfont
 
-from commentary_service import CommentaryService
+from commentary_service import (
+    AI_MODEL_PRESETS,
+    AIRequestCredential,
+    DEFAULT_AI_MODEL_PRESET,
+    CommentaryService,
+)
 from data_provider import COMPETITIONS, CommentaryEntry, DataProvider, LeaderRow, Leaderboard, Match, MatchTeam, Player, Snapshot, Team
 from localization import NameLocalizer
 from news_service import FreeTranslationService, NewsItem, NewsService
@@ -62,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.6"
+APP_VERSION = "1.5.7"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -826,13 +831,73 @@ class WorldCupFloatApp:
         self.news_items: dict[str, list[NewsItem]] = {}
         self.news_loading: set[str] = set()
         self.news_queue: deque[
-            tuple[str, bool, int, str, str]
+            tuple[str, bool, int, object, str]
         ] = deque()
         self.news_queued: set[str] = set()
         self.news_queue_lock = threading.Lock()
         self.news_worker_running = False
         self.news_active_key = ""
-        self.agnes_api_key_var = tk.StringVar(value=str(self.secrets.get("agnes_api_key") or ""))
+        configured_model = str(
+            self.config.get("ai_model_preset")
+            or DEFAULT_AI_MODEL_PRESET
+        )
+        self.active_ai_model_preset = (
+            configured_model
+            if configured_model in AI_MODEL_PRESETS
+            else DEFAULT_AI_MODEL_PRESET
+        )
+        stored_keys = self.secrets.get("ai_api_keys") or {}
+        self.ai_api_keys = {
+            key: str(stored_keys.get(key) or "")
+            for key in AI_MODEL_PRESETS
+        }
+        if not self.ai_api_keys["agnes"]:
+            self.ai_api_keys["agnes"] = str(
+                self.secrets.get("agnes_api_key") or ""
+            )
+        self.ai_model_var = tk.StringVar(
+            value=self.active_ai_model_preset
+        )
+        self.ai_model_name_var = tk.StringVar(
+            value=str(
+                AI_MODEL_PRESETS[
+                    self.active_ai_model_preset
+                ]["label"]
+            )
+        )
+        self.agnes_api_key_var = tk.StringVar(
+            value=self.ai_api_keys.get(
+                self.active_ai_model_preset,
+                "",
+            )
+        )
+        self.commentary_service.configure_model(
+            self.active_ai_model_preset
+        )
+        self.tencent_translate_secret_id_var = tk.StringVar(
+            value=str(
+                self.secrets.get("tencent_translate_secret_id")
+                or ""
+            )
+        )
+        self.tencent_translate_secret_key_var = tk.StringVar(
+            value=str(
+                self.secrets.get("tencent_translate_secret_key")
+                or ""
+            )
+        )
+        self.free_translation_service.configure_tencent(
+            self.tencent_translate_secret_id_var.get(),
+            self.tencent_translate_secret_key_var.get(),
+        )
+        self.translation_status_var = tk.StringVar(
+            value=(
+                "腾讯云翻译已配置，将在 MyMemory 失败时接管"
+                if self.tencent_translate_secret_id_var.get().strip()
+                and self.tencent_translate_secret_key_var.get().strip()
+                else "MyMemory 为首选；未配置腾讯云备用翻译"
+            )
+        )
         self.ai_status_var = tk.StringVar(value="AI 已启用" if self.agnes_api_key_var.get().strip() else "未设置 API Key，将显示原始数据")
         self.ai_cache_status_var = tk.StringVar(value=self._ai_cache_status_text())
         self.live_refresh_seconds_var = tk.IntVar(value=self._valid_seconds(self.config.get("live_refresh_seconds"), 5))
@@ -926,9 +991,25 @@ class WorldCupFloatApp:
 
     def _save_secrets(self) -> None:
         try:
+            if hasattr(self, "active_ai_model_preset"):
+                self.ai_api_keys[self.active_ai_model_preset] = (
+                    self.agnes_api_key_var.get().strip()
+                )
             SECRETS_PATH.write_text(
                 json.dumps(
-                    {"agnes_api_key": self.agnes_api_key_var.get().strip()},
+                    {
+                        "agnes_api_key": self.ai_api_keys.get(
+                            "agnes",
+                            "",
+                        ),
+                        "ai_api_keys": self.ai_api_keys,
+                        "tencent_translate_secret_id": (
+                            self.tencent_translate_secret_id_var.get().strip()
+                        ),
+                        "tencent_translate_secret_key": (
+                            self.tencent_translate_secret_key_var.get().strip()
+                        ),
+                    },
                     ensure_ascii=False,
                     indent=2,
                 ) + "\n",
@@ -964,6 +1045,7 @@ class WorldCupFloatApp:
                         "title_alignment_preference": self.title_preferred_alignment if hasattr(self, "title_preferred_alignment") else "center",
                         "match_notifications": bool(self.match_notifications_var.get()) if hasattr(self, "match_notifications_var") else True,
                         "ai_commentary": bool(self.ai_commentary_var.get()) if hasattr(self, "ai_commentary_var") else True,
+                        "ai_model_preset": self.active_ai_model_preset if hasattr(self, "active_ai_model_preset") else DEFAULT_AI_MODEL_PRESET,
                         "ai_translate_raw": bool(self.ai_translate_raw_var.get()) if hasattr(self, "ai_translate_raw_var") else False,
                         "free_translate": bool(self.free_translate_var.get()) if hasattr(self, "free_translate_var") else True,
                         "commentary_lines": self._valid_commentary_lines(self.commentary_lines_var.get(), 3) if hasattr(self, "commentary_lines_var") else 3,
@@ -1559,12 +1641,16 @@ class WorldCupFloatApp:
             self._refresh_live_commentary(self.snapshot, force=True)
 
     def _test_agnes_connection(self) -> None:
-        key = self.agnes_api_key_var.get().strip()
+        raw_key = self.agnes_api_key_var.get().strip()
         self._save_config()
         self._save_secrets()
-        if not key:
+        if not raw_key:
             self.ai_status_var.set("请先填写 AI API Key")
             return
+        key = AIRequestCredential(
+            raw_key,
+            self.active_ai_model_preset,
+        )
         self.ai_status_var.set("正在测试 AI 连接...")
 
         def worker() -> None:
@@ -1574,6 +1660,101 @@ class WorldCupFloatApp:
             except Exception as exc:
                 status = f"连接失败：{exc}"
             self._post_ui(lambda text=status: self.ai_status_var.set(text))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _current_ai_credential(
+        self,
+    ) -> AIRequestCredential | str:
+        key = self.agnes_api_key_var.get().strip()
+        if not key:
+            return ""
+        return AIRequestCredential(
+            key,
+            self.active_ai_model_preset,
+        )
+
+    def _select_ai_model(
+        self,
+        _event: tk.Event | None = None,
+    ) -> None:
+        selected_label = self.ai_model_name_var.get()
+        selected = next(
+            (
+                key
+                for key, preset in AI_MODEL_PRESETS.items()
+                if preset["label"] == selected_label
+            ),
+            DEFAULT_AI_MODEL_PRESET,
+        )
+        self.ai_api_keys[self.active_ai_model_preset] = (
+            self.agnes_api_key_var.get().strip()
+        )
+        self.active_ai_model_preset = selected
+        self.ai_model_var.set(selected)
+        self.commentary_service.configure_model(selected)
+        self.agnes_api_key_var.set(
+            self.ai_api_keys.get(selected, "")
+        )
+        self.ai_status_var.set(
+            "AI 已启用"
+            if self.agnes_api_key_var.get().strip()
+            else "请填写当前模型对应的 API Key"
+        )
+        self._save_config()
+        self._save_secrets()
+
+    def _save_translation_credentials(
+        self,
+        *_args,
+    ) -> None:
+        secret_id = (
+            self.tencent_translate_secret_id_var.get().strip()
+        )
+        secret_key = (
+            self.tencent_translate_secret_key_var.get().strip()
+        )
+        self.free_translation_service.configure_tencent(
+            secret_id,
+            secret_key,
+        )
+        self.translation_status_var.set(
+            "腾讯云翻译已配置，将在 MyMemory 失败时接管"
+            if secret_id and secret_key
+            else "MyMemory 为首选；未配置腾讯云备用翻译"
+        )
+        self._save_secrets()
+
+    def _test_translation_connection(self) -> None:
+        self._save_translation_credentials()
+        if not (
+            self.tencent_translate_secret_id_var.get().strip()
+            and self.tencent_translate_secret_key_var.get().strip()
+        ):
+            self.translation_status_var.set(
+                "请先填写腾讯云 SecretId 与 SecretKey"
+            )
+            return
+        self.translation_status_var.set("正在测试腾讯云翻译...")
+
+        def worker() -> None:
+            try:
+                text = (
+                    self.free_translation_service._translate_tencent(
+                        "football match"
+                    )
+                )
+                status = (
+                    "腾讯云翻译连接成功"
+                    if text
+                    else "腾讯云翻译返回为空"
+                )
+            except Exception as exc:
+                status = f"腾讯云翻译连接失败：{exc}"
+            self._post_ui(
+                lambda current=status:
+                self.translation_status_var.set(current)
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1589,7 +1770,10 @@ class WorldCupFloatApp:
         popup.attributes("-topmost", True)
         popup.attributes("-alpha", 0.98)
         width = min(350, max(300, self.root.winfo_width() - 8))
-        height = 310
+        height = min(
+            540,
+            max(400, self.root.winfo_screenheight() - 120),
+        )
         x = min(
             max(8, self.root.winfo_x() + 14),
             max(8, self.root.winfo_screenwidth() - width - 8),
@@ -1611,7 +1795,7 @@ class WorldCupFloatApp:
         header.pack(fill="x")
         title = tk.Label(
             header,
-            text="如何获取免费 API Key",
+            text="如何获取免费模型 API Key",
             bg=PANEL,
             fg=TEXT,
             font=("Microsoft YaHei UI", 11, "bold"),
@@ -1630,54 +1814,96 @@ class WorldCupFloatApp:
         self._bind_drag(header)
         self._bind_drag(title)
 
-        body = tk.Frame(popup, bg=PANEL, padx=12, pady=8)
-        body.pack(fill="both", expand=True)
-        steps = (
-            "1. 打开 Agnes AI 平台并注册或登录账号。\n"
-            "2. 进入 API Key 管理页面，创建一个免费 API Key。\n"
-            "3. 复制生成的 Key，粘贴到设置中的“AI API Key”。\n"
-            "4. 点击“测试”，显示连接成功后即可使用。"
+        scroll = ScrollFrame(popup, bg=PANEL)
+        scroll.pack(
+            fill="both",
+            expand=True,
+            padx=12,
+            pady=(0, 10),
         )
-        guide = tk.Label(
-            body,
-            text=steps,
-            bg=PANEL,
-            fg=TEXT,
-            anchor="nw",
-            justify="left",
-            font=("Microsoft YaHei UI", 9),
+        body = scroll.body
+
+        def add_guide(
+            heading: str,
+            text: str,
+            link_text: str,
+            url: str,
+        ) -> None:
+            card = tk.Frame(
+                body,
+                bg=PANEL_2,
+                padx=10,
+                pady=9,
+                highlightthickness=1,
+                highlightbackground=LINE,
+            )
+            card.pack(fill="x", pady=4)
+            tk.Label(
+                card,
+                text=heading,
+                bg=PANEL_2,
+                fg=ACCENT,
+                anchor="w",
+                font=("Microsoft YaHei UI", 9, "bold"),
+            ).pack(fill="x")
+            guide = tk.Label(
+                card,
+                text=text,
+                bg=PANEL_2,
+                fg=TEXT,
+                anchor="nw",
+                justify="left",
+                font=("Microsoft YaHei UI", 8),
+            )
+            guide.pack(fill="x", pady=(5, 7))
+            self._bind_wrap(
+                guide,
+                reserve=20,
+                minimum=220,
+                maximum=310,
+            )
+            link = tk.Label(
+                card,
+                text=link_text,
+                bg=PANEL_3,
+                fg=ACCENT,
+                cursor="hand2",
+                anchor="center",
+                padx=8,
+                pady=6,
+                font=("Microsoft YaHei UI", 8, "bold"),
+            )
+            link.pack(fill="x")
+            self._bind_click(
+                link,
+                lambda _event, target=url:
+                webbrowser.open(target),
+            )
+
+        add_guide(
+            "Agnes · agnes-2.0-flash（默认首选）",
+            "注册或登录 Agnes，进入 API Key 管理页面创建 Key。"
+            "在设置中选择 Agnes 模型，粘贴 Key 后点击测试。",
+            "打开 Agnes AI 平台",
+            "https://platform.agnes-ai.com/",
         )
-        guide.pack(fill="x")
-        self._bind_wrap(guide, reserve=8, minimum=220, maximum=318)
-        link = tk.Label(
-            body,
-            text="打开 Agnes AI 免费申请页面",
-            bg=PANEL_2,
-            fg=ACCENT,
-            cursor="hand2",
-            anchor="center",
-            font=("Microsoft YaHei UI", 9, "bold"),
-            padx=10,
-            pady=8,
-            highlightthickness=1,
-            highlightbackground=LINE,
+        add_guide(
+            "智谱 GLM · glm-4.7-flash",
+            "注册智谱开放平台，进入 API Keys 页面创建 Key。"
+            "在设置中选择 GLM-4.7-Flash 并粘贴该 Key。"
+            "该预设会自动指定 glm-4.7-flash，并关闭深度思考以降低实时延迟。",
+            "打开智谱开放平台",
+            "https://open.bigmodel.cn/usercenter/apikeys",
         )
-        link.pack(fill="x", pady=(14, 8))
-        self._bind_click(
-            link,
-            lambda _event: webbrowser.open("https://platform.agnes-ai.com/"),
+        add_guide(
+            "腾讯云机器翻译（MyMemory 失败时备用）",
+            "在腾讯云访问管理中创建仅授予机器翻译权限的子用户密钥，"
+            "把 SecretId 与 SecretKey 填入设置。软件始终先使用 MyMemory，"
+            "只有其失败、限流或返回为空时才调用腾讯云大陆节点。"
+            "不要使用主账号全权限密钥。",
+            "打开腾讯云 API 密钥管理",
+            "https://console.cloud.tencent.com/cam/capi",
         )
-        note = tk.Label(
-            body,
-            text="免费额度与可用模型以 Agnes AI 平台当前规则为准。",
-            bg=PANEL,
-            fg=MUTED,
-            anchor="w",
-            justify="left",
-            font=("Microsoft YaHei UI", 8),
-        )
-        note.pack(fill="x")
-        self._bind_wrap(note, reserve=8, minimum=220, maximum=318)
         self._apply_fonts_to_tree(popup)
 
     def _ai_cache_status_text(self, prefix: str = "") -> str:
@@ -1741,7 +1967,7 @@ class WorldCupFloatApp:
                 return
             self.ai_prewarm_running = True
             generation = self.commentary_service.cache_generation
-            api_key = self.agnes_api_key_var.get().strip()
+            api_key = self._current_ai_credential()
 
             def worker() -> None:
                 rendered = 0
@@ -3286,6 +3512,29 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             activebackground=PANEL_2,
             activeforeground=TEXT,
         ).pack(anchor="w", pady=(5, 0))
+        tk.Label(
+            commentary_panel,
+            text="AI 模型",
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="w", pady=(8, 3))
+        model_combo = ttk.Combobox(
+            commentary_panel,
+            textvariable=self.ai_model_name_var,
+            values=[
+                str(preset["label"])
+                for preset in AI_MODEL_PRESETS.values()
+            ],
+            state="readonly",
+            style="WorldCup.TCombobox",
+        )
+        model_combo.pack(fill="x")
+        model_combo.bind(
+            "<<ComboboxSelected>>",
+            self._select_ai_model,
+        )
+        model_combo.bind("<MouseWheel>", scroll_settings)
         lines_row = tk.Frame(commentary_panel, bg=PANEL_2)
         lines_row.pack(fill="x", pady=(7, 0))
         tk.Label(lines_row, text="主界面显示行数", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(side="left")
@@ -3303,7 +3552,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         lines_entry.pack(side="right", ipady=3)
         lines_entry.bind("<Return>", self._save_commentary_settings)
         lines_entry.bind("<FocusOut>", self._save_commentary_settings)
-        tk.Label(commentary_panel, text="AI API Key", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(8, 3))
+        tk.Label(commentary_panel, text="当前模型 API Key", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(8, 3))
         key_row = tk.Frame(commentary_panel, bg=PANEL_2)
         key_row.pack(fill="x")
         key_entry = tk.Entry(
@@ -3331,7 +3580,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         ).pack(fill="x", pady=(6, 0))
         help_link = tk.Label(
             commentary_panel,
-            text="如何获取免费 API Key",
+            text="如何获取免费模型 API Key",
             bg=PANEL_2,
             fg=ACCENT,
             cursor="hand2",
@@ -3340,6 +3589,85 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         )
         help_link.pack(fill="x", pady=(8, 0))
         self._bind_click(help_link, lambda _event: self._open_api_help())
+
+        tk.Label(
+            commentary_panel,
+            text="备用翻译（腾讯云机器翻译）",
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 8),
+        ).pack(anchor="w", pady=(10, 3))
+        tk.Label(
+            commentary_panel,
+            text="SecretId",
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 7),
+        ).pack(anchor="w")
+        translate_id_entry = tk.Entry(
+            commentary_panel,
+            textvariable=self.tencent_translate_secret_id_var,
+            bg=PANEL_3,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=("Microsoft YaHei UI", 8),
+        )
+        translate_id_entry.pack(fill="x", ipady=3)
+        tk.Label(
+            commentary_panel,
+            text="SecretKey",
+            bg=PANEL_2,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 7),
+        ).pack(anchor="w", pady=(5, 0))
+        translate_key_row = tk.Frame(
+            commentary_panel,
+            bg=PANEL_2,
+        )
+        translate_key_row.pack(fill="x", pady=(5, 0))
+        translate_key_entry = tk.Entry(
+            translate_key_row,
+            textvariable=self.tencent_translate_secret_key_var,
+            show="•",
+            bg=PANEL_3,
+            fg=TEXT,
+            insertbackground=TEXT,
+            relief="flat",
+            font=("Microsoft YaHei UI", 8),
+        )
+        translate_key_entry.pack(
+            side="left",
+            fill="x",
+            expand=True,
+            ipady=3,
+        )
+        self._text_button(
+            translate_key_row,
+            "测试",
+            self._test_translation_connection,
+        ).pack(side="left", padx=(7, 0))
+        for entry in (
+            translate_id_entry,
+            translate_key_entry,
+        ):
+            entry.bind(
+                "<Return>",
+                self._save_translation_credentials,
+            )
+            entry.bind(
+                "<FocusOut>",
+                self._save_translation_credentials,
+            )
+        tk.Label(
+            commentary_panel,
+            textvariable=self.translation_status_var,
+            bg=PANEL_2,
+            fg=MUTED,
+            anchor="w",
+            justify="left",
+            font=("Microsoft YaHei UI", 7),
+        ).pack(fill="x", pady=(5, 0))
 
         tk.Label(commentary_panel, text="语音播报", bg=PANEL_2, fg=MUTED, font=("Microsoft YaHei UI", 8)).pack(anchor="w", pady=(10, 3))
         tk.Checkbutton(
@@ -3954,7 +4282,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         use_ai = bool(self.ai_commentary_var.get())
         translate_raw = bool(self.ai_translate_raw_var.get())
         free_translate = bool(self.free_translate_var.get())
-        api_key = self.agnes_api_key_var.get().strip()
+        api_key = self._current_ai_credential()
 
         def worker() -> None:
             entries, _detail, error = self.provider.get_match_commentary(
@@ -4121,7 +4449,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.detail_commentary_loading.add(match.id)
         self.detail_commentary_errors.pop(match.id, None)
         self._render_detail_commentary(match)
-        api_key = self.agnes_api_key_var.get().strip()
+        api_key = self._current_ai_credential()
         free_translate = self.free_translate_var.get()
 
         def worker() -> None:
@@ -4217,7 +4545,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             self.summary_texts[match.id] = cached
             self._update_summary_label(match.id)
             return
-        api_key = self.agnes_api_key_var.get().strip()
+        api_key = self._current_ai_credential()
         if not api_key:
             self.summary_errors[match.id] = "未设置 AI API Key，暂时无法生成比赛总结。"
             self._update_summary_label(match.id)
@@ -4888,7 +5216,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 key,
                 force,
                 self.news_weeks_var.get(),
-                self.agnes_api_key_var.get().strip(),
+                self._current_ai_credential(),
                 self.favorite_teams.get(key, ""),
             )
             if priority:
@@ -4943,7 +5271,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         key: str,
         force: bool,
         weeks: int,
-        api_key: str,
+        api_key: object,
         favorite: str,
     ) -> None:
         espn_league = str(COMPETITIONS[key]["espn"])
@@ -5224,7 +5552,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._bind_wrap(content, reserve=26, minimum=130, maximum=300)
         self._text_button(body.body, "打开原文", lambda: webbrowser.open(item.url)).pack(anchor="w", pady=(12, 0))
         self._apply_fonts_to_tree(popup)
-        api_key = self.agnes_api_key_var.get().strip()
+        api_key = self._current_ai_credential()
         cached_content = self.news_service.cached_content(
             item.id,
             require_ai=bool(api_key),
@@ -7088,7 +7416,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         kind: str,
         names: list[str],
     ) -> None:
-        key = self.agnes_api_key_var.get().strip()
+        key = self._current_ai_credential()
         cache_key = "players" if kind == "player" else "teams"
         missing = [
             name for name in dict.fromkeys(names)

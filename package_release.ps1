@@ -32,7 +32,13 @@ Copy-Item -LiteralPath (Join-Path $projectDir "README.md") -Destination $portabl
 
 $blankSecrets = @{
     agnes_api_key = ""
-} | ConvertTo-Json
+    ai_api_keys = @{
+        agnes = ""
+        glm = ""
+    }
+    tencent_translate_secret_id = ""
+    tencent_translate_secret_key = ""
+} | ConvertTo-Json -Depth 4
 Set-Content -LiteralPath (Join-Path $portableDir "secrets.json") -Value $blankSecrets -Encoding UTF8
 
 $cacheSource = Join-Path $projectDir "cache"
@@ -57,7 +63,14 @@ if (Test-Path -LiteralPath $imageSource) {
 
 $packagedSecrets = Get-Content -LiteralPath (Join-Path $portableDir "secrets.json") -Raw |
     ConvertFrom-Json
-if ([string]$packagedSecrets.agnes_api_key) {
+$containsSecret = (
+    [bool][string]$packagedSecrets.agnes_api_key -or
+    [bool][string]$packagedSecrets.ai_api_keys.agnes -or
+    [bool][string]$packagedSecrets.ai_api_keys.glm -or
+    [bool][string]$packagedSecrets.tencent_translate_secret_id -or
+    [bool][string]$packagedSecrets.tencent_translate_secret_key
+)
+if ($containsSecret) {
     throw "Refusing to package a non-empty API key."
 }
 

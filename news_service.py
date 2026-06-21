@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import re
 import time
 import threading
@@ -73,6 +75,7 @@ class NewsItem:
 
 class FreeTranslationService:
     API_URL = "https://api.mymemory.translated.net/get"
+    TENCENT_ENDPOINT = "https://tmt.tencentcloudapi.com"
     FOOTBALL_GLOSSARY = {
         "player": "球员",
         "players": "球员",
@@ -95,6 +98,16 @@ class FreeTranslationService:
         except Exception:
             self.cache = {}
         self.lock = threading.Lock()
+        self.tencent_secret_id = ""
+        self.tencent_secret_key = ""
+
+    def configure_tencent(
+        self,
+        secret_id: str,
+        secret_key: str,
+    ) -> None:
+        self.tencent_secret_id = str(secret_id or "").strip()
+        self.tencent_secret_key = str(secret_key or "").strip()
 
     def translate(self, text: str, glossary: dict[str, str]) -> str:
         text = " ".join(str(text or "").split())
@@ -118,14 +131,19 @@ class FreeTranslationService:
                     protected = protected[:start] + token + protected[start + len(source):]
                     start = protected.casefold().find(source.casefold(), start + len(token))
                 placeholders[token] = target
-        params = urllib.parse.urlencode({"q": protected[:480], "langpair": "en|zh-CN"})
-        request = urllib.request.Request(
-            f"{self.API_URL}?{params}",
-            headers={"User-Agent": "WorldCupFloat/1.5"},
-        )
-        with urllib.request.urlopen(request, timeout=12) as response:
-            data = json.loads(response.read().decode("utf-8-sig"))
-        translated = str((data.get("responseData") or {}).get("translatedText") or "").strip()
+        try:
+            translated = self._translate_mymemory(protected[:480])
+        except Exception:
+            translated = ""
+        if (
+            not translated
+            and self.tencent_secret_id
+            and self.tencent_secret_key
+        ):
+            try:
+                translated = self._translate_tencent(protected[:1800])
+            except Exception:
+                translated = ""
         for token, target in placeholders.items():
             translated = translated.replace(token, target)
         if translated:
@@ -136,6 +154,116 @@ class FreeTranslationService:
                     encoding="utf-8",
                 )
         return translated
+
+    def _translate_mymemory(self, text: str) -> str:
+        params = urllib.parse.urlencode(
+            {"q": text, "langpair": "en|zh-CN"}
+        )
+        request = urllib.request.Request(
+            f"{self.API_URL}?{params}",
+            headers={"User-Agent": "WorldCupFloat/1.5"},
+        )
+        with urllib.request.urlopen(request, timeout=12) as response:
+            data = json.loads(response.read().decode("utf-8-sig"))
+        return str(
+            (data.get("responseData") or {}).get("translatedText")
+            or ""
+        ).strip()
+
+    def _translate_tencent(self, text: str) -> str:
+        service = "tmt"
+        host = "tmt.tencentcloudapi.com"
+        action = "TextTranslate"
+        version = "2018-03-21"
+        region = "ap-guangzhou"
+        timestamp = int(time.time())
+        date = time.strftime("%Y-%m-%d", time.gmtime(timestamp))
+        payload = json.dumps(
+            {
+                "SourceText": text,
+                "Source": "en",
+                "Target": "zh",
+                "ProjectId": 0,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        canonical_headers = (
+            "content-type:application/json; charset=utf-8\n"
+            f"host:{host}\n"
+        )
+        signed_headers = "content-type;host"
+        hashed_payload = hashlib.sha256(
+            payload.encode("utf-8")
+        ).hexdigest()
+        canonical_request = "\n".join(
+            [
+                "POST",
+                "/",
+                "",
+                canonical_headers,
+                signed_headers,
+                hashed_payload,
+            ]
+        )
+        credential_scope = f"{date}/{service}/tc3_request"
+        string_to_sign = "\n".join(
+            [
+                "TC3-HMAC-SHA256",
+                str(timestamp),
+                credential_scope,
+                hashlib.sha256(
+                    canonical_request.encode("utf-8")
+                ).hexdigest(),
+            ]
+        )
+
+        def sign(key: bytes, message: str) -> bytes:
+            return hmac.new(
+                key,
+                message.encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+
+        secret_date = sign(
+            ("TC3" + self.tencent_secret_key).encode("utf-8"),
+            date,
+        )
+        secret_service = sign(secret_date, service)
+        secret_signing = sign(secret_service, "tc3_request")
+        signature = hmac.new(
+            secret_signing,
+            string_to_sign.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        authorization = (
+            "TC3-HMAC-SHA256 "
+            f"Credential={self.tencent_secret_id}/{credential_scope}, "
+            f"SignedHeaders={signed_headers}, "
+            f"Signature={signature}"
+        )
+        request = urllib.request.Request(
+            self.TENCENT_ENDPOINT,
+            data=payload.encode("utf-8"),
+            headers={
+                "Authorization": authorization,
+                "Content-Type": "application/json; charset=utf-8",
+                "Host": host,
+                "X-TC-Action": action,
+                "X-TC-Timestamp": str(timestamp),
+                "X-TC-Version": version,
+                "X-TC-Region": region,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=12) as response:
+            data = json.loads(response.read().decode("utf-8-sig"))
+        result = data.get("Response") or {}
+        if result.get("Error"):
+            raise RuntimeError(
+                str((result.get("Error") or {}).get("Message") or "")
+            )
+        return str(result.get("TargetText") or "").strip()
 
     def translate_many(self, texts: list[str], glossary: dict[str, str]) -> list[str]:
         result: list[str] = []

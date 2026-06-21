@@ -33,6 +33,7 @@
   "title_alignment_preference": "center",
   "match_notifications": true,
   "ai_commentary": true,
+  "ai_model_preset": "agnes",
   "ai_translate_raw": false,
   "free_translate": true,
   "commentary_lines": 3,

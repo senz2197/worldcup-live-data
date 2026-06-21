@@ -7,16 +7,36 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from data_provider import CommentaryEntry, Match
 
 
-AGNES_API_URL = "https://apihub.agnes-ai.com/v1/chat/completions"
-AGNES_MODEL = "agnes-2.0-flash"
+AI_MODEL_PRESETS = {
+    "agnes": {
+        "label": "Agnes · agnes-2.0-flash",
+        "api_url": "https://apihub.agnes-ai.com/v1/chat/completions",
+        "model": "agnes-2.0-flash",
+        "extra": {},
+    },
+    "glm": {
+        "label": "智谱 GLM · glm-4.7-flash",
+        "api_url": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+        "model": "glm-4.7-flash",
+        "extra": {"thinking": {"type": "disabled"}},
+    },
+}
+DEFAULT_AI_MODEL_PRESET = "agnes"
 AI_CACHE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 AI_CACHE_META_KEY = "_match_cached_at"
+
+
+@dataclass(frozen=True)
+class AIRequestCredential:
+    api_key: str
+    preset_id: str = DEFAULT_AI_MODEL_PRESET
 
 
 class CommentaryService:
@@ -26,9 +46,18 @@ class CommentaryService:
         self.request_lock = threading.Lock()
         self.last_request_at = 0.0
         self.cache_generation = 0
+        self.model_preset_id = DEFAULT_AI_MODEL_PRESET
         self.cache = self._load_cache()
         self._prepare_cache_metadata()
         self.prune_expired_cache()
+
+    def configure_model(self, preset_id: str) -> str:
+        self.model_preset_id = (
+            preset_id
+            if preset_id in AI_MODEL_PRESETS
+            else DEFAULT_AI_MODEL_PRESET
+        )
+        return self.model_preset_id
 
     def _load_cache(self) -> dict[str, Any]:
         try:
@@ -693,11 +722,26 @@ class CommentaryService:
         timeout_seconds: int = 45,
         temperature: float = 0.25,
     ) -> str:
-        key = (api_key or os.environ.get("AGNES_API_KEY") or "").strip()
+        if isinstance(api_key, AIRequestCredential):
+            request_key = api_key.api_key
+            preset_id = api_key.preset_id
+        else:
+            request_key = str(api_key or "")
+            preset_id = self.model_preset_id
+        preset = AI_MODEL_PRESETS.get(
+            preset_id,
+            AI_MODEL_PRESETS[DEFAULT_AI_MODEL_PRESET],
+        )
+        environment_key = (
+            os.environ.get("AGNES_API_KEY")
+            if preset_id == "agnes"
+            else ""
+        )
+        key = (request_key or environment_key or "").strip()
         if not key:
             raise RuntimeError("未设置 AI API Key")
         payload = {
-            "model": AGNES_MODEL,
+            "model": preset["model"],
             "messages": [
                 {
                     "role": "system",
@@ -708,12 +752,13 @@ class CommentaryService:
             "temperature": max(0.0, min(1.0, float(temperature))),
             "max_tokens": max_tokens,
         }
+        payload.update(dict(preset.get("extra") or {}))
         with self.request_lock:
             wait_seconds = max(0.0, 0.8 - (time.monotonic() - self.last_request_at))
             if wait_seconds:
                 time.sleep(wait_seconds)
             request = urllib.request.Request(
-                AGNES_API_URL,
+                str(preset["api_url"]),
                 data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 headers={
                     "Authorization": f"Bearer {key}",
