@@ -1345,6 +1345,7 @@ class WorldCupFloatApp:
         justify = "center" if centered else "left"
         self.title_label.configure(anchor=anchor, justify=justify)
         self.status_label.configure(anchor=anchor, justify=justify)
+        self._layout_header_controls()
         self._update_title_wrap_reserve()
         if centered:
             self.root.after_idle(self._ensure_title_alignment_fits)
@@ -1434,15 +1435,40 @@ class WorldCupFloatApp:
     def _apply_quick_refresh_visibility(self) -> None:
         if self.quick_refresh_button is None:
             return
-        if self.quick_refresh_var.get():
+        self._layout_header_controls()
+        self._update_title_wrap_reserve()
+        self.root.after_idle(self._ensure_title_alignment_fits)
+
+    def _layout_header_controls(self) -> None:
+        if (
+            self.header_frame is None
+            or self.quick_refresh_button is None
+            or self.competition_button is None
+        ):
+            return
+        centered = self.title_alignment_var.get() != "left"
+        quick_visible = self.quick_refresh_var.get()
+        left_width = 22 if centered and quick_visible else 0
+        right_refresh_width = 22 if not centered and quick_visible else 0
+        self.header_frame.columnconfigure(0, minsize=left_width)
+        self.header_frame.columnconfigure(1, weight=1)
+        self.header_frame.columnconfigure(
+            2,
+            minsize=right_refresh_width,
+        )
+        self.header_frame.columnconfigure(3, minsize=22)
+        if quick_visible:
             self.quick_refresh_button.grid(
                 row=0,
-                column=0,
+                column=0 if centered else 2,
+                padx=(0, 0) if centered else (0, 5),
             )
         else:
             self.quick_refresh_button.grid_remove()
-        self._update_title_wrap_reserve()
-        self.root.after_idle(self._ensure_title_alignment_fits)
+        self.competition_button.grid(
+            row=0,
+            column=3,
+        )
 
     def _apply_status_visibility(self) -> None:
         if self.status_label is None:
@@ -1453,7 +1479,7 @@ class WorldCupFloatApp:
                 self.status_label.grid(
                     row=1,
                     column=0,
-                    columnspan=3,
+                    columnspan=4,
                     sticky="ew",
                     pady=(2, 0),
                 )
@@ -2274,9 +2300,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._configure_fonts()
         header = tk.Frame(self.root, bg=BG)
         header.pack(fill="x", padx=14, pady=(12, 6))
-        header.columnconfigure(0, minsize=22)
+        header.columnconfigure(0, minsize=0)
         header.columnconfigure(1, weight=1)
-        header.columnconfigure(2, minsize=22)
+        header.columnconfigure(2, minsize=0)
+        header.columnconfigure(3, minsize=22)
         self.header_frame = header
         self.root.bind("<Button-3>", self._show_context_menu)
 
@@ -2320,7 +2347,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             pady=0,
             font=("Microsoft YaHei UI", 9, "bold"),
         )
-        competition_button.grid(row=0, column=2)
+        competition_button.grid(row=0, column=3)
         self._bind_click(
             competition_button,
             lambda _event: self._open_competition_popup(),
@@ -2338,7 +2365,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         status_label.grid(
             row=1,
             column=0,
-            columnspan=3,
+            columnspan=4,
             sticky="ew",
             pady=(2, 0),
         )
