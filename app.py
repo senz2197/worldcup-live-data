@@ -62,7 +62,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.5.6"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -1350,20 +1350,14 @@ class WorldCupFloatApp:
             self.root.after_idle(self._ensure_title_alignment_fits)
 
     def _title_control_reserve(self) -> int:
-        reserve = 19
-        if self.quick_refresh_var.get():
-            reserve += 21
-        return reserve
+        # Controls occupy dedicated mirrored grid columns and never overlap the
+        # title's own layout area.
+        return 0
 
     def _update_title_wrap_reserve(self) -> None:
         if self.title_label is None:
             return
-        controls = self._title_control_reserve()
-        self.title_label._worldcup_wrap_reserve = (
-            controls * 2
-            if self.title_alignment_var.get() == "center"
-            else controls
-        )
+        self.title_label._worldcup_wrap_reserve = 0
 
     def _ensure_title_alignment_fits(
         self,
@@ -1441,14 +1435,12 @@ class WorldCupFloatApp:
         if self.quick_refresh_button is None:
             return
         if self.quick_refresh_var.get():
-            self.quick_refresh_button.place(
-                relx=1.0,
-                x=-23,
-                y=3,
-                anchor="ne",
+            self.quick_refresh_button.grid(
+                row=0,
+                column=0,
             )
         else:
-            self.quick_refresh_button.place_forget()
+            self.quick_refresh_button.grid_remove()
         self._update_title_wrap_reserve()
         self.root.after_idle(self._ensure_title_alignment_fits)
 
@@ -1458,9 +1450,15 @@ class WorldCupFloatApp:
         if self.show_status_var.get():
             self.status_var.set(self.last_status_text)
             if not self.status_label.winfo_manager():
-                self.status_label.pack(fill="x", pady=(2, 0))
+                self.status_label.grid(
+                    row=1,
+                    column=0,
+                    columnspan=3,
+                    sticky="ew",
+                    pady=(2, 0),
+                )
         else:
-            self.status_label.pack_forget()
+            self.status_label.grid_remove()
 
     def _save_refresh_settings(self, *_args) -> None:
         self.live_refresh_seconds_var.set(self._valid_seconds(self.live_refresh_seconds_var.get(), 5))
@@ -2276,11 +2274,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._configure_fonts()
         header = tk.Frame(self.root, bg=BG)
         header.pack(fill="x", padx=14, pady=(12, 6))
+        header.columnconfigure(0, minsize=22)
+        header.columnconfigure(1, weight=1)
+        header.columnconfigure(2, minsize=22)
         self.header_frame = header
         self.root.bind("<Button-3>", self._show_context_menu)
 
         title_box = tk.Frame(header, bg=BG)
-        title_box.pack(fill="x", expand=True)
+        title_box.grid(row=0, column=1, sticky="ew")
         self.title_box = title_box
         title_box.bind(
             "<Configure>",
@@ -2292,10 +2293,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             text="↻",
             bg=BG,
             fg=ACCENT,
-            padx=3,
-            pady=1,
+            padx=0,
+            pady=0,
             cursor="hand2",
-            font=("Microsoft YaHei UI", 11, "bold"),
+            font=("Microsoft YaHei UI", 9, "bold"),
             highlightthickness=0,
             bd=0,
         )
@@ -2310,16 +2311,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         )
         title_label.pack(fill="x")
         competition_button = tk.Label(
-            title_box,
+            header,
             text="▾",
             bg=BG,
             fg=ACCENT,
             cursor="hand2",
-            padx=5,
-            pady=1,
-            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=0,
+            pady=0,
+            font=("Microsoft YaHei UI", 9, "bold"),
         )
-        competition_button.place(relx=1.0, x=-1, y=4, anchor="ne")
+        competition_button.grid(row=0, column=2)
         self._bind_click(
             competition_button,
             lambda _event: self._open_competition_popup(),
@@ -2328,13 +2329,19 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.competition_button = competition_button
         self._bind_wrap(title_label, reserve=34, minimum=120, maximum=260)
         status_label = tk.Label(
-            title_box,
+            header,
             textvariable=self.status_var,
             bg=BG,
             fg=MUTED,
             font=("Microsoft YaHei UI", 9),
         )
-        status_label.pack(anchor="w", pady=(2, 0))
+        status_label.grid(
+            row=1,
+            column=0,
+            columnspan=3,
+            sticky="ew",
+            pady=(2, 0),
+        )
         self.status_label = status_label
         self._bind_wrap(status_label, reserve=12, minimum=120, maximum=260)
         self._apply_status_visibility()

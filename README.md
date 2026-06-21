@@ -60,6 +60,7 @@ WorldCupFloat_Portable.zip
 - More expressive professional live commentary prompts with strict source-fact safeguards
 - Match stage and status headers share space and scale together without clipping at compact widths
 - The title stays centered with quick refresh enabled by scaling and wrapping without silently changing the user's alignment setting
+- Quick refresh and competition selection use mirrored, equal-width title-bar slots with matched icon sizing and vertical alignment
 - Live match notifications automatically close when their tracked matches finish
 - Wrapped labels size from their real container width so news, cards, popups, and compact layouts keep complete glyphs visible
 - Full match commentary timelines and cached AI post-match summaries
