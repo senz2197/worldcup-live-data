@@ -29,6 +29,7 @@ Copy-Item -LiteralPath (Join-Path $projectDir "config.json") -Destination $porta
 Copy-Item -LiteralPath (Join-Path $projectDir "version.json") -Destination $portableDir
 Copy-Item -LiteralPath (Join-Path $projectDir "selected_app_icon.ico") -Destination $portableDir
 Copy-Item -LiteralPath (Join-Path $projectDir "README.md") -Destination $portableDir
+Copy-Item -LiteralPath (Join-Path $projectDir "START_HERE.txt") -Destination $portableDir
 
 $blankSecrets = @{
     agnes_api_key = ""
