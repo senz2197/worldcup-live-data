@@ -177,6 +177,8 @@ class Player:
     club_team_id: str = ""
     club_team_name: str = ""
     club_competition_key: str = ""
+    data_season_year: int = 0
+    data_competition_key: str = ""
 
 
 @dataclass
@@ -433,7 +435,7 @@ class DataProvider:
                 ttl_seconds=max(1, min(168, int(ttl_hours))) * 3600,
                 force=force,
             )
-            players = self._parse_roster(data)
+            players = self._parse_roster(data, season)
             if (
                 not players
                 and season_year is None
@@ -451,7 +453,7 @@ class DataProvider:
                     ttl_seconds=max(1, min(168, int(ttl_hours))) * 3600,
                     force=force,
                 )
-                players = self._parse_roster(fallback)
+                players = self._parse_roster(fallback, previous_season)
             return players, None
         except Exception as exc:
             return [], f"球员名单暂时不可用: {exc}"
@@ -536,6 +538,8 @@ class DataProvider:
                 league_slug,
                 "",
             ),
+            data_season_year=player.data_season_year,
+            data_competition_key=player.data_competition_key,
         )
 
     def _load_scoreboard(self, force: bool = False) -> dict[str, Any]:
@@ -885,7 +889,11 @@ class DataProvider:
             boards.append(board)
         return boards
 
-    def _parse_roster(self, data: dict[str, Any]) -> list[Player]:
+    def _parse_roster(
+        self,
+        data: dict[str, Any],
+        season_year: int = 0,
+    ) -> list[Player]:
         players: list[Player] = []
         for athlete in data.get("athletes") or []:
             birth_place = athlete.get("birthPlace") or {}
@@ -920,6 +928,8 @@ class DataProvider:
                     citizenship=athlete.get("citizenship") or "",
                     headshot=headshot,
                     stats=stats,
+                    data_season_year=season_year,
+                    data_competition_key=self.competition_key,
                 )
             )
         players.sort(key=lambda p: (p.position, int(p.jersey) if p.jersey.isdigit() else 99, p.name))

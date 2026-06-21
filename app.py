@@ -62,7 +62,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.5.5"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -754,6 +754,7 @@ class WorldCupFloatApp:
         self.match_popup_match_id = ""
         self.match_popup_opening = False
         self.match_notification_popup: tk.Toplevel | None = None
+        self.match_notification_ids: set[str] = set()
         self.notified_live_match_ids: set[str] = set()
         self.tray_icon = None
         self.drag_origin = (0, 0)
@@ -763,6 +764,8 @@ class WorldCupFloatApp:
         self.popups_at_pointer_press: list[tk.Toplevel] = []
         self.popup_back_stack: list = []
         self.resize_origin = (0, 0, 0, 0)
+        self.header_frame: tk.Frame | None = None
+        self.title_box: tk.Frame | None = None
         self.title_label: tk.Label | None = None
         self.status_label: tk.Label | None = None
         self.competition_button: tk.Label | None = None
@@ -795,6 +798,16 @@ class WorldCupFloatApp:
         self.title_alignment_var = tk.StringVar(
             value="left" if self.config.get("title_alignment") == "left" else "center"
         )
+        preferred_alignment = str(
+            self.config.get("title_alignment_preference")
+            or self.title_alignment_var.get()
+        )
+        self.title_preferred_alignment = (
+            "left"
+            if preferred_alignment == "left"
+            else "center"
+        )
+        self.title_alignment_var.set(self.title_preferred_alignment)
         self.match_notifications_var = tk.BooleanVar(value=bool(self.config.get("match_notifications", True)))
         self.ai_commentary_var = tk.BooleanVar(value=bool(self.config.get("ai_commentary", True)))
         self.ai_translate_raw_var = tk.BooleanVar(value=bool(self.config.get("ai_translate_raw", False)))
@@ -809,8 +822,16 @@ class WorldCupFloatApp:
         self.professional_boards_cache: dict[str, list[Leaderboard]] = {}
         self.professional_boards_loaded_at: dict[str, float] = {}
         self.professional_boards_loading: set[str] = set()
+        self.professional_board_seasons: dict[str, set[int]] = {}
         self.news_items: dict[str, list[NewsItem]] = {}
         self.news_loading: set[str] = set()
+        self.news_queue: deque[
+            tuple[str, bool, int, str, str]
+        ] = deque()
+        self.news_queued: set[str] = set()
+        self.news_queue_lock = threading.Lock()
+        self.news_worker_running = False
+        self.news_active_key = ""
         self.agnes_api_key_var = tk.StringVar(value=str(self.secrets.get("agnes_api_key") or ""))
         self.ai_status_var = tk.StringVar(value="AI 已启用" if self.agnes_api_key_var.get().strip() else "未设置 API Key，将显示原始数据")
         self.ai_cache_status_var = tk.StringVar(value=self._ai_cache_status_text())
@@ -832,6 +853,7 @@ class WorldCupFloatApp:
         self._start_tray_icon()
         self.root.after(50, self._mark_as_tool_window)
         self.refresh_data(force=False, quiet=False)
+        self.root.after(120, self._queue_startup_news)
         self.auto_refresh_after_id: str | None = None
         self._schedule_next_refresh()
         self.root.after(1600, self._commentary_poll)
@@ -939,6 +961,7 @@ class WorldCupFloatApp:
                         "show_status": bool(self.show_status_var.get()) if hasattr(self, "show_status_var") else False,
                         "show_live_labels": bool(self.show_live_labels_var.get()) if hasattr(self, "show_live_labels_var") else True,
                         "title_alignment": self.title_alignment_var.get() if hasattr(self, "title_alignment_var") else "center",
+                        "title_alignment_preference": self.title_preferred_alignment if hasattr(self, "title_preferred_alignment") else "center",
                         "match_notifications": bool(self.match_notifications_var.get()) if hasattr(self, "match_notifications_var") else True,
                         "ai_commentary": bool(self.ai_commentary_var.get()) if hasattr(self, "ai_commentary_var") else True,
                         "ai_translate_raw": bool(self.ai_translate_raw_var.get()) if hasattr(self, "ai_translate_raw_var") else False,
@@ -1036,6 +1059,31 @@ class WorldCupFloatApp:
             return fallback
         return max(1, min(lines, 8))
 
+    def _season_label(
+        self,
+        season_year: int | None = None,
+        snapshot: Snapshot | None = None,
+        competition_key: str = "",
+    ) -> str:
+        snapshot = snapshot or self.snapshot
+        year = int(
+            season_year
+            or (snapshot.season_year if snapshot is not None else 0)
+            or 0
+        )
+        if year <= 0:
+            return "赛季待定"
+        if competition_key in COMPETITIONS:
+            is_league = COMPETITIONS[competition_key].get("kind") == "league"
+        else:
+            is_league = bool(
+                snapshot
+                and snapshot.competition_kind == "league"
+            )
+        if is_league:
+            return f"{year}-{str(year + 1)[-2:]} 赛季"
+        return f"{year} 赛季"
+
     def _valid_font_name(self, value: str | None, fallback: str) -> str:
         value = str(value or "").strip()
         if value in self.available_fonts:
@@ -1101,6 +1149,7 @@ class WorldCupFloatApp:
                         header.after_idle(align_header)
                     except tk.TclError:
                         pass
+        self.root.after_idle(self._ensure_title_alignment_fits)
         self._save_config()
 
     def _valid_palette_name(self, value: str | None) -> str:
@@ -1220,6 +1269,7 @@ class WorldCupFloatApp:
                 self.tray_icon.title = title
             except Exception:
                 pass
+        self.root.after_idle(self._ensure_title_alignment_fits)
         self._save_config()
 
     def _apply_theme_color(self) -> None:
@@ -1281,7 +1331,9 @@ class WorldCupFloatApp:
         self._apply_status_visibility()
 
     def _set_title_alignment(self, value: str) -> None:
-        self.title_alignment_var.set("left" if value == "left" else "center")
+        selected = "left" if value == "left" else "center"
+        self.title_preferred_alignment = selected
+        self.title_alignment_var.set(selected)
         self._apply_title_alignment()
         self._save_config()
 
@@ -1293,6 +1345,82 @@ class WorldCupFloatApp:
         justify = "center" if centered else "left"
         self.title_label.configure(anchor=anchor, justify=justify)
         self.status_label.configure(anchor=anchor, justify=justify)
+        self._update_title_wrap_reserve()
+        if centered:
+            self.root.after_idle(self._ensure_title_alignment_fits)
+
+    def _title_control_reserve(self) -> int:
+        reserve = 19
+        if self.quick_refresh_var.get():
+            reserve += 21
+        return reserve
+
+    def _update_title_wrap_reserve(self) -> None:
+        if self.title_label is None:
+            return
+        controls = self._title_control_reserve()
+        self.title_label._worldcup_wrap_reserve = (
+            controls * 2
+            if self.title_alignment_var.get() == "center"
+            else controls
+        )
+
+    def _ensure_title_alignment_fits(
+        self,
+        _event: tk.Event | None = None,
+    ) -> None:
+        if (
+            self.title_label is None
+            or self.title_box is None
+        ):
+            return
+        if self.title_preferred_alignment != "center":
+            if self.title_alignment_var.get() != "left":
+                self.title_alignment_var.set("left")
+                self._apply_title_alignment()
+                self._save_config()
+            self._set_title_font_size(17)
+            return
+        width = self.title_box.winfo_width()
+        if width <= 1:
+            return
+        available = width - self._title_control_reserve() * 2
+        selected_size = 17
+        for size in range(17, 10, -1):
+            try:
+                font = tkfont.Font(
+                    root=self.root,
+                    family=self.ui_font_var.get(),
+                    size=size,
+                    weight="bold",
+                )
+                required = font.measure(self.app_title_var.get())
+            except tk.TclError:
+                return
+            if required <= max(24, available):
+                selected_size = size
+                break
+        else:
+            selected_size = 11
+        self._set_title_font_size(selected_size)
+        if self.title_alignment_var.get() != "center":
+            self.title_alignment_var.set("center")
+            self._apply_title_alignment()
+            self._save_config()
+
+    def _set_title_font_size(self, size: int) -> None:
+        if self.title_label is None:
+            return
+        try:
+            self.title_label.configure(
+                font=(
+                    self.ui_font_var.get(),
+                    size,
+                    "bold",
+                )
+            )
+        except tk.TclError:
+            pass
 
     def _toggle_match_notifications(self) -> None:
         self._save_config()
@@ -1313,10 +1441,16 @@ class WorldCupFloatApp:
         if self.quick_refresh_button is None:
             return
         if self.quick_refresh_var.get():
-            if not self.quick_refresh_button.winfo_manager():
-                self.quick_refresh_button.pack(side="right", padx=(8, 0))
+            self.quick_refresh_button.place(
+                relx=1.0,
+                x=-23,
+                y=3,
+                anchor="ne",
+            )
         else:
-            self.quick_refresh_button.pack_forget()
+            self.quick_refresh_button.place_forget()
+        self._update_title_wrap_reserve()
+        self.root.after_idle(self._ensure_title_alignment_fits)
 
     def _apply_status_visibility(self) -> None:
         if self.status_label is None:
@@ -1333,15 +1467,20 @@ class WorldCupFloatApp:
         self.default_refresh_seconds_var.set(self._valid_seconds(self.default_refresh_seconds_var.get(), 300))
         self.roster_refresh_hours_var.set(max(1, min(168, int(self.roster_refresh_hours_var.get() or 24))))
         self.professional_boards_loaded_at.clear()
+        self.professional_board_seasons.clear()
         self.roster_loaded_at.clear()
         self._save_config()
         self._schedule_next_refresh()
 
     def _save_news_settings(self, *_args) -> None:
         self.news_weeks_var.set(max(1, min(12, int(self.news_weeks_var.get() or 1))))
-        self.news_items.pop(self.active_competition_key, None)
+        self.news_items.clear()
         self._invalidate_render_cache("news")
         self._save_config()
+        self._load_news(
+            self.active_competition_key,
+            priority=True,
+        )
         if self.active_tab == "news" and self.snapshot:
             self.render_news()
 
@@ -1942,8 +2081,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     if event is not None and event.widget == label
                     else label.winfo_width()
                 )
+                extra_reserve = int(
+                    getattr(label, "_worldcup_wrap_reserve", 0)
+                )
                 if label_width > 1:
-                    available = max(24, label_width - 6)
+                    available = max(
+                        24,
+                        label_width - 6 - extra_reserve,
+                    )
                 else:
                     parent_width = (
                         event.width
@@ -2131,10 +2276,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._configure_fonts()
         header = tk.Frame(self.root, bg=BG)
         header.pack(fill="x", padx=14, pady=(12, 6))
+        self.header_frame = header
         self.root.bind("<Button-3>", self._show_context_menu)
 
         title_box = tk.Frame(header, bg=BG)
-        title_box.pack(side="left", fill="x", expand=True)
+        title_box.pack(fill="x", expand=True)
+        self.title_box = title_box
+        title_box.bind(
+            "<Configure>",
+            self._ensure_title_alignment_fits,
+            add="+",
+        )
         quick_refresh = tk.Label(
             header,
             text="↻",
@@ -2253,9 +2405,6 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             if not (
                 key == "bracket"
                 and self.active_competition_key != "worldcup"
-            ) and not (
-                key == "news"
-                and self.active_competition_key == "worldcup"
             )
         ]
 
@@ -2370,6 +2519,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         )
         self.active_competition_key = competition_key
         self.provider.set_competition(competition_key)
+        self._load_news(competition_key, priority=True)
         self.app_title_var.set(self.competition_titles[competition_key])
         self.root.title(self.app_title_var.get())
         if self.tray_icon is not None:
@@ -2475,13 +2625,44 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             return
         visible_keys = self._visible_tab_keys()
         columns = len(visible_keys)
+        cell_width = max(1, width // max(1, columns))
+        font_size = 8
+        while font_size > 6:
+            font = tkfont.Font(
+                root=self.root,
+                family=self.ui_font_var.get(),
+                size=font_size,
+                weight="bold",
+            )
+            if all(
+                font.measure(str(self.tab_buttons[key].cget("text")))
+                <= cell_width - 6
+                for key in visible_keys
+            ):
+                break
+            font_size -= 1
         for key in self.tab_button_order:
             if key not in visible_keys:
                 self.tab_buttons[key].grid_remove()
         for index, key in enumerate(visible_keys):
             button = self.tab_buttons[key]
-            button.grid(row=0, column=index, sticky="ew", padx=(0, 3), pady=(0, 4))
-            button.configure(wraplength=max(26, min(48, width // columns - 6)))
+            button.grid(
+                row=0,
+                column=index,
+                sticky="ew",
+                padx=1,
+                pady=(0, 4),
+            )
+            button.configure(
+                wraplength=0,
+                justify="center",
+                padx=1,
+                font=(
+                    self.ui_font_var.get(),
+                    font_size,
+                    "bold",
+                ),
+            )
         for column in range(len(self.tab_button_order)):
             self.tab_bar.columnconfigure(
                 column,
@@ -3374,6 +3555,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.app_title_var.set(
             self.competition_titles[snapshot.competition_key]
         )
+        self.root.after_idle(self._ensure_title_alignment_fits)
         options = ["全部球队"]
         self.team_options = {"全部球队": ""}
         favorite_id = self.favorite_teams.get(snapshot.competition_key, "")
@@ -3433,6 +3615,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 self._load_complete_detail_commentary(match, request_summary=True)
             if match.id == self.match_popup_match_id and match.is_live:
                 self._load_complete_detail_commentary(match)
+        self._sync_match_notification(
+            snapshot,
+            current_live_ids,
+        )
         self.live_match_ids = current_live_ids
 
     def _apply_pending_snapshot(self) -> None:
@@ -4467,7 +4653,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._section(
             frame.body,
             "联赛积分" if is_league else "小组积分",
-            "胜平负、进失球、净胜球与积分",
+            (
+                f"{self._season_label(snapshot=self.snapshot)} · "
+                "胜平负、进失球、净胜球与积分"
+            ),
         )
         self._team_filter_bar(frame.body)
         groups = self.snapshot.standings if self.snapshot else []
@@ -4513,7 +4702,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._section(
             frame.body,
             "联赛数据中心" if is_league else "数据面板",
-            "射手、助攻、参与进球、球队表现与积分数据",
+            (
+                f"{self._data_board_season_label()} · "
+                "射手、助攻、参与进球、球队表现与积分数据"
+            ),
         )
         boards = self._data_boards()
         if not boards:
@@ -4548,20 +4740,20 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def render_news(self) -> None:
         frame = self.tabs["news"]
         frame.clear()
-        if not self.snapshot or self.snapshot.competition_kind != "league":
-            self._empty(frame.body, "世界杯模式暂不显示联赛资讯。")
+        if not self.snapshot:
+            self._empty(frame.body, "正在准备赛事资讯…")
             return
         self._section(
             frame.body,
             f"{self.snapshot.competition_name}资讯",
-            f"近 {self.news_weeks_var.get()} 周 · 联赛与主队重要动态",
+            f"近 {self.news_weeks_var.get()} 周 · 赛事与主队重要动态",
         )
         key = self.snapshot.competition_key
-        if key not in self.news_items and key not in self.news_loading:
-            self._load_news(self.snapshot)
+        if key not in self.news_items:
+            self._load_news(self.snapshot, priority=True)
         items = self.news_items.get(key, [])
         if key in self.news_loading and not items:
-            self._empty(frame.body, "正在整理联赛资讯…")
+            self._empty(frame.body, "正在整理赛事资讯…")
             return
         if not items:
             self._empty(frame.body, "所选时间范围内暂无资讯。")
@@ -4601,100 +4793,141 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             for widget in (card, title):
                 self._bind_click(widget, lambda _event, current=item: self._open_news_detail(current))
 
-    def _load_news(self, snapshot: Snapshot, force: bool = False) -> None:
-        key = snapshot.competition_key
-        if key in self.news_loading:
-            return
-        self.news_loading.add(key)
-        favorite = self.favorite_teams.get(key, "")
-        weeks = self.news_weeks_var.get()
-        api_key = self.agnes_api_key_var.get().strip()
-        espn_league = str(COMPETITIONS[key]["espn"])
+    def _queue_startup_news(self) -> None:
+        favorite_keys = [
+            key
+            for key in COMPETITIONS
+            if self.favorite_teams.get(key)
+        ]
+        if self.active_competition_key in favorite_keys:
+            ordered = [
+                self.active_competition_key,
+                *(
+                    key
+                    for key in favorite_keys
+                    if key != self.active_competition_key
+                ),
+            ]
+        else:
+            ordered = [
+                *favorite_keys,
+                self.active_competition_key,
+            ]
+        for key in ordered:
+            self._load_news(key, priority=False)
 
-        def worker() -> None:
-            items = self.news_service.fetch(
-                espn_league,
-                weeks=weeks,
-                favorite_team_id=favorite,
-                force=force,
+    def _load_news(
+        self,
+        snapshot_or_key: Snapshot | str,
+        force: bool = False,
+        priority: bool = True,
+    ) -> None:
+        key = (
+            snapshot_or_key.competition_key
+            if isinstance(snapshot_or_key, Snapshot)
+            else str(snapshot_or_key)
+        )
+        if key not in COMPETITIONS:
+            return
+        with self.news_queue_lock:
+            if key == self.news_active_key:
+                return
+            if key in self.news_items and not force:
+                return
+            if key in self.news_queued:
+                if priority:
+                    queued_task = next(
+                        (
+                            task
+                            for task in self.news_queue
+                            if task[0] == key
+                        ),
+                        None,
+                    )
+                    if queued_task is not None:
+                        self.news_queue.remove(queued_task)
+                        self.news_queue.appendleft(queued_task)
+                return
+            if key in self.news_loading:
+                return
+            task = (
+                key,
+                force,
+                self.news_weeks_var.get(),
+                self.agnes_api_key_var.get().strip(),
+                self.favorite_teams.get(key, ""),
             )
-            pending: list[NewsItem] = []
-            for item in items:
-                item.translated_title, item.translated_summary = (
-                    self.news_service.cached_translation(
-                        item.id,
-                        require_ai=bool(api_key),
-                    )
+            if priority:
+                self.news_queue.appendleft(task)
+            else:
+                self.news_queue.append(task)
+            self.news_queued.add(key)
+            self.news_loading.add(key)
+            if self.news_worker_running:
+                return
+            self.news_worker_running = True
+        threading.Thread(
+            target=self._news_worker_loop,
+            daemon=True,
+        ).start()
+
+    def _news_worker_loop(self) -> None:
+        while True:
+            with self.news_queue_lock:
+                if not self.news_queue:
+                    self.news_worker_running = False
+                    return
+                key, force, weeks, api_key, favorite = (
+                    self.news_queue.popleft()
                 )
-                if item.translated_title:
-                    item_glossary = self._news_glossary(item)
-                    item.translated_title = self._enforce_glossary(item.translated_title, item_glossary)
-                    item.translated_summary = self._enforce_glossary(item.translated_summary, item_glossary)
-                if not self._contains_chinese(item.translated_title):
-                    item.translated_title = ""
-                    item.translated_summary = ""
-                    pending.append(item)
-            ready = [
-                item for item in items
-                if self._contains_chinese(item.translated_title)
-            ]
-            if ready:
+                self.news_queued.discard(key)
+                self.news_active_key = key
+            try:
+                self._prepare_news(
+                    key,
+                    force,
+                    weeks,
+                    api_key,
+                    favorite,
+                )
+            except Exception:
                 self._post_ui(
-                    lambda current=list(ready):
-                    self._apply_news(key, current, translating=True)
+                    lambda current_key=key:
+                    self._apply_news(
+                        current_key,
+                        [],
+                        translating=False,
+                    )
                 )
-            glossary: dict[str, str] = {}
-            for item in pending:
-                glossary.update(self._news_glossary(item))
-            if api_key:
-                for start in range(0, len(pending), 8):
-                    batch = pending[start:start + 8]
-                    try:
-                        translated = self.commentary_service.translate_news_batch(
-                            [{"id": item.id, "title": item.title, "summary": item.summary} for item in batch],
-                            glossary,
-                            api_key,
-                        )
-                    except Exception:
-                        translated = {}
-                    for item in batch:
-                        item.translated_title, item.translated_summary = translated.get(
-                            item.id, ("", "")
-                        )
-            unresolved = [
-                item for item in pending
-                if not self._contains_chinese(item.translated_title)
-            ]
-            if unresolved:
-                texts = [
-                    text
-                    for item in unresolved
-                    for text in (item.title, item.summary)
-                ]
-                try:
-                    translated_rows = self.free_translation_service.translate_many(
-                        texts,
-                        glossary,
-                    )
-                except Exception:
-                    translated_rows = []
-                for index, item in enumerate(unresolved):
-                    item.translated_title = (
-                        translated_rows[index * 2]
-                        if index * 2 < len(translated_rows)
-                        else ""
-                    )
-                    item.translated_summary = (
-                        translated_rows[index * 2 + 1]
-                        if index * 2 + 1 < len(translated_rows)
-                        else ""
-                    )
-            for item in pending:
-                provider = (
-                    "ai"
-                    if api_key and item not in unresolved
-                    else "free"
+            finally:
+                with self.news_queue_lock:
+                    if self.news_active_key == key:
+                        self.news_active_key = ""
+
+    def _prepare_news(
+        self,
+        key: str,
+        force: bool,
+        weeks: int,
+        api_key: str,
+        favorite: str,
+    ) -> None:
+        espn_league = str(COMPETITIONS[key]["espn"])
+        items = self.news_service.fetch(
+            espn_league,
+            weeks=weeks,
+            favorite_team_id=favorite,
+            force=force,
+        )
+        pending: list[NewsItem] = []
+        for item in items:
+            item.translated_title, item.translated_summary = (
+                self.news_service.cached_translation(
+                    item.id,
+                    require_ai=bool(api_key),
                 )
+            )
+            if item.translated_title:
                 item_glossary = self._news_glossary(item)
                 item.translated_title = self._enforce_glossary(
                     item.translated_title,
@@ -4704,23 +4937,127 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     item.translated_summary,
                     item_glossary,
                 )
-                valid_title = self._contains_chinese(item.translated_title)
-                valid_summary = self._contains_chinese(item.translated_summary)
-                if valid_title:
-                    if not valid_summary:
-                        item.translated_summary = "该资讯暂未提供可用的中文摘要。"
-                    self.news_service.store_translation(
-                        item.id,
-                        item.translated_title,
-                        item.translated_summary,
-                        provider=provider,
+            if not self._contains_chinese(item.translated_title):
+                item.translated_title = ""
+                item.translated_summary = ""
+                pending.append(item)
+        ready = [
+            item
+            for item in items
+            if self._contains_chinese(item.translated_title)
+        ]
+        if ready:
+            self._post_ui(
+                lambda current=list(ready), current_key=key:
+                self._apply_news(
+                    current_key,
+                    current,
+                    translating=True,
+                )
+            )
+        glossary: dict[str, str] = {}
+        for item in pending:
+            glossary.update(self._news_glossary(item))
+        if api_key:
+            for start in range(0, len(pending), 8):
+                batch = pending[start:start + 8]
+                try:
+                    translated = (
+                        self.commentary_service.translate_news_batch(
+                            [
+                                {
+                                    "id": item.id,
+                                    "title": item.title,
+                                    "summary": item.summary,
+                                }
+                                for item in batch
+                            ],
+                            glossary,
+                            api_key,
+                        )
                     )
-                else:
-                    item.translated_title = "资讯中文化暂时不可用"
-                    item.translated_summary = "暂时无法生成中文内容，请稍后刷新。"
-            self._post_ui(lambda current=items: self._apply_news(key, current, translating=False))
-
-        threading.Thread(target=worker, daemon=True).start()
+                except Exception:
+                    translated = {}
+                for item in batch:
+                    item.translated_title, item.translated_summary = (
+                        translated.get(item.id, ("", ""))
+                    )
+        unresolved = [
+            item
+            for item in pending
+            if not self._contains_chinese(item.translated_title)
+        ]
+        if unresolved:
+            texts = [
+                text
+                for item in unresolved
+                for text in (item.title, item.summary)
+            ]
+            try:
+                translated_rows = (
+                    self.free_translation_service.translate_many(
+                        texts,
+                        glossary,
+                    )
+                )
+            except Exception:
+                translated_rows = []
+            for index, item in enumerate(unresolved):
+                item.translated_title = (
+                    translated_rows[index * 2]
+                    if index * 2 < len(translated_rows)
+                    else ""
+                )
+                item.translated_summary = (
+                    translated_rows[index * 2 + 1]
+                    if index * 2 + 1 < len(translated_rows)
+                    else ""
+                )
+        for item in pending:
+            provider = (
+                "ai"
+                if api_key and item not in unresolved
+                else "free"
+            )
+            item_glossary = self._news_glossary(item)
+            item.translated_title = self._enforce_glossary(
+                item.translated_title,
+                item_glossary,
+            )
+            item.translated_summary = self._enforce_glossary(
+                item.translated_summary,
+                item_glossary,
+            )
+            valid_title = self._contains_chinese(
+                item.translated_title
+            )
+            valid_summary = self._contains_chinese(
+                item.translated_summary
+            )
+            if valid_title:
+                if not valid_summary:
+                    item.translated_summary = (
+                        "该资讯暂未提供可用的中文摘要。"
+                    )
+                self.news_service.store_translation(
+                    item.id,
+                    item.translated_title,
+                    item.translated_summary,
+                    provider=provider,
+                )
+            else:
+                item.translated_title = "资讯中文化暂时不可用"
+                item.translated_summary = (
+                    "暂时无法生成中文内容，请稍后刷新。"
+                )
+        self._post_ui(
+            lambda current=items, current_key=key:
+            self._apply_news(
+                current_key,
+                current,
+                translating=False,
+            )
+        )
 
     def _news_glossary(
         self,
@@ -5038,6 +5375,20 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             boards.append(team_board("teamPlayed", "Matches Played", "场"))
         return [board for board in boards if board.rows]
 
+    def _data_board_season_label(self) -> str:
+        if not self.snapshot:
+            return "赛季待定"
+        seasons = self.professional_board_seasons.get(
+            self.snapshot.competition_key,
+            set(),
+        )
+        if not seasons:
+            return self._season_label(snapshot=self.snapshot)
+        return " / ".join(
+            self._season_label(year, self.snapshot)
+            for year in sorted(seasons)
+        )
+
     def _load_professional_boards(self, snapshot: Snapshot) -> None:
         key = snapshot.competition_key
         max_age = self.roster_refresh_hours_var.get() * 3600
@@ -5054,13 +5405,26 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
         def worker() -> None:
             players: list[tuple[Player, Team]] = []
+            seasons_used: set[int] = set()
             for team in snapshot.teams.values():
                 roster, _error = provider.get_roster(team.id, season_year=snapshot.season_year, ttl_hours=roster_ttl_hours)
                 if not any(player.stats for player in roster) and snapshot.season_year > 2000:
                     roster, _error = provider.get_roster(team.id, season_year=snapshot.season_year - 1, ttl_hours=roster_ttl_hours)
+                seasons_used.update(
+                    player.data_season_year
+                    for player in roster
+                    if player.stats and player.data_season_year
+                )
                 players.extend((player, team) for player in roster if player.stats)
             boards = self._professional_boards(players)
-            self._post_ui(lambda: self._apply_professional_boards(key, boards))
+            self._post_ui(
+                lambda current_seasons=seasons_used:
+                self._apply_professional_boards(
+                    key,
+                    boards,
+                    current_seasons,
+                )
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -5091,11 +5455,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 boards.append(Leaderboard(key, name, rows[:50]))
         return boards
 
-    def _apply_professional_boards(self, key: str, boards: list[Leaderboard]) -> None:
+    def _apply_professional_boards(
+        self,
+        key: str,
+        boards: list[Leaderboard],
+        seasons: set[int] | None = None,
+    ) -> None:
         self.professional_boards_loading.discard(key)
         if boards:
             self.professional_boards_cache[key] = boards
             self.professional_boards_loaded_at[key] = time.time()
+            self.professional_board_seasons[key] = set(seasons or ())
             self._request_name_localization(
                 "player",
                 [
@@ -5542,6 +5912,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if popup is not None and popup.winfo_exists():
             popup.destroy()
         self.match_notification_popup = None
+        self.match_notification_ids.clear()
 
     def _maybe_close_match_notification(self, _event: tk.Event) -> None:
         if self.match_notification_popup is not None and self.match_notification_popup.winfo_exists():
@@ -5566,6 +5937,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._close_match_notification()
         popup = tk.Toplevel(self.root)
         self.match_notification_popup = popup
+        self.match_notification_ids = {
+            match.id
+            for match in matches
+        }
         popup.overrideredirect(True)
         popup.configure(bg=LINE)
         popup.attributes("-topmost", True)
@@ -5654,6 +6029,28 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         popup.geometry(f"{width}x{height}+{x}+{y}")
         popup.deiconify()
         popup.lift()
+
+    def _sync_match_notification(
+        self,
+        snapshot: Snapshot,
+        current_live_ids: set[str],
+    ) -> None:
+        if (
+            self.match_notification_popup is None
+            or not self.match_notification_popup.winfo_exists()
+        ):
+            return
+        remaining = [
+            match
+            for match in snapshot.matches
+            if match.id in self.match_notification_ids
+            and match.id in current_live_ids
+        ]
+        remaining_ids = {match.id for match in remaining}
+        if not remaining:
+            self._close_match_notification()
+        elif remaining_ids != self.match_notification_ids:
+            self._show_match_notification(remaining)
 
     def _bind_notification_close(self, widget: tk.Widget) -> None:
         self._bind_click(widget, lambda _event: self._close_match_notification())
@@ -6267,6 +6664,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                                 if self.active_competition_key != "worldcup"
                                 else ""
                             ),
+                            data_season_year=(
+                                self.snapshot.season_year
+                                if self.snapshot else 0
+                            ),
+                            data_competition_key=self.active_competition_key,
                         )
                     ),
                 )
@@ -6375,6 +6777,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._invalidate_render_cache("team")
         self.news_items.pop(self.active_competition_key, None)
         self._invalidate_render_cache("news")
+        self._load_news(
+            self.active_competition_key,
+            priority=True,
+        )
         if self.active_tab == "team":
             self.render_team()
 
@@ -7017,7 +7423,26 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     lambda _event, current=player:
                     self._open_external_club(current),
                 )
-        tk.Label(parent, text="赛事数据", bg=PANEL, fg=MUTED, font=("Microsoft YaHei UI", 9, "bold")).pack(anchor="w")
+        data_header = tk.Frame(parent, bg=PANEL)
+        data_header.pack(fill="x")
+        tk.Label(
+            data_header,
+            text="赛事数据",
+            bg=PANEL,
+            fg=MUTED,
+            font=("Microsoft YaHei UI", 9, "bold"),
+        ).pack(side="left")
+        tk.Label(
+            data_header,
+            text=self._season_label(
+                player.data_season_year,
+                self.snapshot,
+                player.data_competition_key,
+            ),
+            bg=PANEL,
+            fg=ACCENT,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        ).pack(side="right")
         if not player.stats:
             tk.Label(parent, text="暂无出场统计", bg=PANEL, fg=MUTED).pack(anchor="w", pady=(8, 0))
             return

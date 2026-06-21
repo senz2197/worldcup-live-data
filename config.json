@@ -30,6 +30,7 @@
   "show_status": false,
   "show_live_labels": true,
   "title_alignment": "center",
+  "title_alignment_preference": "center",
   "match_notifications": true,
   "ai_commentary": true,
   "ai_translate_raw": false,

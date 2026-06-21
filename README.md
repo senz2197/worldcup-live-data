@@ -26,6 +26,7 @@ WorldCupFloat_Portable.zip
 - Completed results defaulting to the current round, with previous/next and all-results controls
 - Group standings with GP/W/D/L/GF/GA/GD/PTS
 - League tables and World Cup knockout bracket placeholders
+- Standings, professional data boards, and player statistics identify the exact season that supplied their data, including previous-season fallbacks
 - Competition-specific statistical leaderboards
 - Professional league leaderboards for goals, assists, goal contributions, appearances, starts, shots, shots on target, conversion, fouls, cards, offsides, and saves
 - Favorite team support for every competition
@@ -47,7 +48,8 @@ WorldCupFloat_Portable.zip
 - Sports-focused Yunjian is the default voice, with Xiaoxiao, Yunyang, Yunxi, and Xiaoyi available in settings
 - Windows OneCore and legacy SAPI voices remain automatic offline fallbacks
 - Live commentary is polled independently every two seconds and shows new source events immediately while translation is pending
-- League news tab with one-to-twelve-week filtering, favorite-team priority, translated summaries, and original-source links
+- World Cup and league news tabs with one-to-twelve-week filtering, favorite-team priority, translated summaries, and original-source links
+- Startup news prewarming prioritizes the active favorite-team competition, then other favorites, then the last active competition; opening a queued news tab promotes it to the next task
 - AI-first Chinese news rewriting with full ESPN article retrieval and free translation fallback
 - News cards and details never fall back to displaying untranslated English copy
 - Free machine translation fallback for commentary and news when AI is disabled or unavailable
@@ -57,6 +59,8 @@ WorldCupFloat_Portable.zip
 - Live speech reads commentary content only, without announcing the match minute
 - More expressive professional live commentary prompts with strict source-fact safeguards
 - Match stage and status headers share space and scale together without clipping at compact widths
+- The title stays centered with quick refresh enabled by scaling and wrapping without silently changing the user's alignment setting
+- Live match notifications automatically close when their tracked matches finish
 - Wrapped labels size from their real container width so news, cards, popups, and compact layouts keep complete glyphs visible
 - Full match commentary timelines and cached AI post-match summaries
 
