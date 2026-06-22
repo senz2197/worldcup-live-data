@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.11"
+APP_VERSION = "1.5.12"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -6962,6 +6962,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 "dragging": False,
                 "pending_render": False,
                 "interaction_revision": 0,
+                "anchor_sequence": None,
             },
         )
         if bool(scroll_state.get("dragging")):
@@ -6978,7 +6979,23 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     scroll_state["top"] = old_view[0]
                     scroll_state["at_bottom"] = old_view[1] >= 0.995
                     if isinstance(child, tk.Text):
-                        scroll_state["index"] = child.index("@8,7")
+                        anchor_index = child.index("@8,7")
+                        scroll_state["index"] = anchor_index
+                        anchor_tag = next(
+                            (
+                                tag
+                                for tag in child.tag_names(anchor_index)
+                                if tag.startswith("event_")
+                            ),
+                            "",
+                        )
+                        if anchor_tag:
+                            try:
+                                scroll_state["anchor_sequence"] = int(
+                                    anchor_tag.removeprefix("event_")
+                                )
+                            except ValueError:
+                                scroll_state["anchor_sequence"] = None
                     break
         except tk.TclError:
             return
@@ -7103,12 +7120,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             timeline.insert(
                 "end",
                 f"{entry.minute or '·'}  {text}\n",
-                tag,
+                (tag, f"event_{entry.sequence}"),
             )
         timeline.configure(state="disabled")
         keep_bottom = bool(scroll_state.get("at_bottom", True))
         saved_top = float(scroll_state.get("top", 0.0) or 0.0)
         saved_index = str(scroll_state.get("index") or "1.0")
+        saved_anchor_sequence = scroll_state.get("anchor_sequence")
         restore_revision = int(
             scroll_state.get("interaction_revision", 0) or 0
         )
@@ -7122,14 +7140,23 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 if keep_bottom:
                     timeline.yview_moveto(1.0)
                 else:
-                    try:
-                        timeline.yview(saved_index)
-                    except tk.TclError:
-                        timeline.yview_moveto(saved_top)
+                    restored = False
+                    if saved_anchor_sequence is not None:
+                        anchor_ranges = timeline.tag_ranges(
+                            f"event_{saved_anchor_sequence}"
+                        )
+                        if anchor_ranges:
+                            timeline.yview(anchor_ranges[0])
+                            restored = True
+                    if not restored:
+                        try:
+                            timeline.yview(saved_index)
+                        except tk.TclError:
+                            timeline.yview_moveto(saved_top)
                 top, bottom = timeline.yview()
                 scroll_state["top"] = top
                 scroll_state["at_bottom"] = bottom >= 0.995
-                scroll_state["index"] = timeline.index("@8,7")
+                remember_anchor()
             except tk.TclError:
                 pass
 
@@ -7140,6 +7167,25 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 int(scroll_state.get("interaction_revision", 0) or 0) + 1
             )
 
+        def remember_anchor() -> None:
+            anchor_index = timeline.index("@8,7")
+            scroll_state["index"] = anchor_index
+            anchor_tag = next(
+                (
+                    tag
+                    for tag in timeline.tag_names(anchor_index)
+                    if tag.startswith("event_")
+                ),
+                "",
+            )
+            if anchor_tag:
+                try:
+                    scroll_state["anchor_sequence"] = int(
+                        anchor_tag.removeprefix("event_")
+                    )
+                except ValueError:
+                    scroll_state["anchor_sequence"] = None
+
         def remember_position() -> None:
             try:
                 top, bottom = timeline.yview()
@@ -7147,7 +7193,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 return
             scroll_state["top"] = top
             scroll_state["at_bottom"] = bottom >= 0.995
-            scroll_state["index"] = timeline.index("@8,7")
+            remember_anchor()
 
         def scroll_text(event: tk.Event) -> str:
             mark_interaction()
@@ -7173,6 +7219,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             _event: tk.Event | None = None,
             render_pending: bool = True,
         ) -> str:
+            if not drag_state["active"]:
+                return "break"
             drag_state["active"] = False
             scroll_state["dragging"] = False
             remember_position()
@@ -7184,6 +7232,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     lambda current=match: self._render_detail_commentary(current)
                 )
             return "break"
+
+        def cancel_drag() -> None:
+            drag_state["active"] = False
+            scroll_state["dragging"] = False
+            scroll_state["pending_render"] = False
 
         def pointer_inside(x_root: int, y_root: int) -> bool:
             try:
@@ -7253,7 +7306,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         )
         timeline.bind(
             "<Destroy>",
-            lambda event: stop_drag(event, render_pending=False),
+            lambda _event: cancel_drag(),
         )
 
     def _match_summary_panel(self, parent: tk.Widget, match: Match) -> None:
