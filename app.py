@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.10"
+APP_VERSION = "1.5.11"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -6961,6 +6961,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 "at_bottom": True,
                 "dragging": False,
                 "pending_render": False,
+                "interaction_revision": 0,
             },
         )
         if bool(scroll_state.get("dragging")):
@@ -6977,7 +6978,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     scroll_state["top"] = old_view[0]
                     scroll_state["at_bottom"] = old_view[1] >= 0.995
                     if isinstance(child, tk.Text):
-                        scroll_state["index"] = child.index("@0,0")
+                        scroll_state["index"] = child.index("@8,7")
                     break
         except tk.TclError:
             return
@@ -7108,9 +7109,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         keep_bottom = bool(scroll_state.get("at_bottom", True))
         saved_top = float(scroll_state.get("top", 0.0) or 0.0)
         saved_index = str(scroll_state.get("index") or "1.0")
+        restore_revision = int(
+            scroll_state.get("interaction_revision", 0) or 0
+        )
 
         def restore_timeline_position() -> None:
             try:
+                if int(
+                    scroll_state.get("interaction_revision", 0) or 0
+                ) != restore_revision:
+                    return
                 if keep_bottom:
                     timeline.yview_moveto(1.0)
                 else:
@@ -7121,11 +7129,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 top, bottom = timeline.yview()
                 scroll_state["top"] = top
                 scroll_state["at_bottom"] = bottom >= 0.995
-                scroll_state["index"] = timeline.index("@0,0")
+                scroll_state["index"] = timeline.index("@8,7")
             except tk.TclError:
                 pass
 
         timeline.after_idle(restore_timeline_position)
+
+        def mark_interaction() -> None:
+            scroll_state["interaction_revision"] = (
+                int(scroll_state.get("interaction_revision", 0) or 0) + 1
+            )
 
         def remember_position() -> None:
             try:
@@ -7134,9 +7147,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 return
             scroll_state["top"] = top
             scroll_state["at_bottom"] = bottom >= 0.995
-            scroll_state["index"] = timeline.index("@0,0")
+            scroll_state["index"] = timeline.index("@8,7")
 
         def scroll_text(event: tk.Event) -> str:
+            mark_interaction()
             direction = -1 if event.delta > 0 else 1
             top, bottom = timeline.yview()
             at_boundary = (direction < 0 and top <= 0.0001) or (direction > 0 and bottom >= 0.9999)
@@ -7183,6 +7197,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 return False
 
         def start_drag(event: tk.Event) -> str:
+            mark_interaction()
             drag_state["active"] = True
             scroll_state["dragging"] = True
             scroll_state["pending_render"] = False
