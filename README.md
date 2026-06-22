@@ -121,6 +121,16 @@ AI API keys are stored only in the local `secrets.json` file. This file is
 excluded from Git and release packages. Without a key, commentary automatically
 falls back to the original ESPN play-by-play text.
 
+`package_release.ps1` always creates the single public
+`WorldCupFloat_Portable.zip` used by GitHub Releases. The persistent local
+runtime is kept in `publish\WorldCupFloat_Local`; packaging and in-app updates
+preserve its `config.json`, `secrets.json`, and cache. A separately named local
+share copy is created only when explicitly requested:
+
+```powershell
+.\package_release.ps1 -CreateSharePackage -ShareOutputDirectory "$HOME\Desktop"
+```
+
 Live buttons only open official broadcaster or official broadcaster-lookup
 pages. The project does not discover, proxy, embed, or redistribute match
 video streams.

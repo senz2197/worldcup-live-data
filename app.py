@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.9"
+APP_VERSION = "1.5.10"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -2187,7 +2187,7 @@ $newExe = Get-ChildItem -LiteralPath $extract -Recurse -Filter $ExecutableName |
 if (-not $newExe) { throw "Updated executable was not found." }
 $source = $newExe.Directory.FullName
 Get-ChildItem -LiteralPath $source | ForEach-Object {
-    if ($_.Name -ne "config.json") {
+    if ($_.Name -notin @("config.json", "secrets.json")) {
         Copy-Item -LiteralPath $_.FullName -Destination $TargetDirectory -Recurse -Force
     }
 }
