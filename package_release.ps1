@@ -8,6 +8,7 @@ $publishRoot = Join-Path $projectDir "publish"
 $releaseRoot = Join-Path $publishRoot "v$version"
 $portableDir = Join-Path $releaseRoot "WorldCupFloat_Portable"
 $archivePath = Join-Path $releaseRoot "WorldCupFloat_Portable.zip"
+$shareArchivePath = Join-Path $releaseRoot "WorldCup_Realtime_Data_v${version}_Share.zip"
 
 $resolvedPublishRoot = [IO.Path]::GetFullPath($publishRoot).TrimEnd("\") + "\"
 $resolvedReleaseRoot = [IO.Path]::GetFullPath($releaseRoot).TrimEnd("\") + "\"
@@ -76,4 +77,6 @@ if ($containsSecret) {
 }
 
 Compress-Archive -LiteralPath $portableDir -DestinationPath $archivePath -CompressionLevel Optimal
+Copy-Item -LiteralPath $archivePath -Destination $shareArchivePath
 Write-Output "Packaged: $archivePath"
+Write-Output "Share package: $shareArchivePath"

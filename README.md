@@ -43,6 +43,8 @@ WorldCupFloat_Portable.zip
 - Theme presets and editable colors with locally persisted settings
 - One-click GitHub update that preserves the current local configuration
 - ESPN play-by-play commentary shown directly below each live score card
+- Clicking live commentary opens a dedicated full timeline that stays synchronized with the main live feed
+- Full commentary drag positions survive refreshes; new events auto-follow only when the viewer is already at the bottom
 - Chinese AI commentary with raw-data and translation modes
 - Selectable AI presets for Agnes `agnes-2.0-flash` and Zhipu `glm-4.7-flash`, with Agnes retained as the default
 - Separate locally persisted API keys per AI provider prevent model switches from overwriting credentials
@@ -59,7 +61,7 @@ WorldCupFloat_Portable.zip
 - Player rosters refresh every 24 hours by default, with a configurable interval
 - Official rights-holder links for live matches and fixtures starting within five minutes
 - Optional compact live-source labels beneath the centered score; completed match details omit live links
-- Live speech reads commentary content only, without announcing the match minute
+- Live speech reads only finalized Chinese commentary, never the untranslated English source or match minute
 - More expressive professional live commentary prompts with strict source-fact safeguards
 - Match stage and status headers share space and scale together without clipping at compact widths
 - The title stays centered with quick refresh enabled by scaling and wrapping without silently changing the user's alignment setting

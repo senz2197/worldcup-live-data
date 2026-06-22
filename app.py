@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.7"
+APP_VERSION = "1.5.8"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -721,6 +721,7 @@ class WorldCupFloatApp:
         self.commentary_texts: dict[str, dict[int, str]] = {}
         self.commentary_errors: dict[str, str] = {}
         self.commentary_loading: set[str] = set()
+        self.commentary_ai_loading: set[str] = set()
         self.summary_texts: dict[str, str] = {}
         self.summary_errors: dict[str, str] = {}
         self.summary_loading: set[str] = set()
@@ -732,6 +733,10 @@ class WorldCupFloatApp:
         self.detail_commentary_snapshots: dict[str, tuple[list[CommentaryEntry], dict[int, str]]] = {}
         self.detail_commentary_loading: set[str] = set()
         self.detail_commentary_errors: dict[str, str] = {}
+        self.commentary_scroll_states: dict[str, dict[str, object]] = {}
+        self.live_detail_prewarmed: set[str] = set()
+        self.roster_name_prewarm_running: set[str] = set()
+        self.roster_name_prewarmed_at: dict[str, float] = {}
         self.match_detail_scroll: ScrollFrame | None = None
         self.standing_labels: dict[tuple[str, str], tk.Label] = {}
         self.leader_labels: dict[tuple[str, str], tk.Label] = {}
@@ -757,6 +762,7 @@ class WorldCupFloatApp:
         self.news_popup: tk.Toplevel | None = None
         self.match_popup: tk.Toplevel | None = None
         self.match_popup_match_id = ""
+        self.match_popup_mode = ""
         self.match_popup_opening = False
         self.match_notification_popup: tk.Toplevel | None = None
         self.match_notification_ids: set[str] = set()
@@ -1530,7 +1536,9 @@ class WorldCupFloatApp:
             return
         centered = self.title_alignment_var.get() != "left"
         quick_visible = self.quick_refresh_var.get()
-        left_width = 22 if centered and quick_visible else 0
+        # Keep the title's left and right reserves symmetric even when the
+        # optional refresh control is hidden.
+        left_width = 22 if centered else 0
         right_refresh_width = 22 if not centered and quick_visible else 0
         self.header_frame.columnconfigure(0, minsize=left_width)
         self.header_frame.columnconfigure(1, weight=1)
@@ -1838,14 +1846,22 @@ class WorldCupFloatApp:
                 highlightbackground=LINE,
             )
             card.pack(fill="x", pady=4)
-            tk.Label(
+            heading_label = tk.Label(
                 card,
                 text=heading,
                 bg=PANEL_2,
                 fg=ACCENT,
-                anchor="w",
+                anchor="nw",
+                justify="left",
                 font=("Microsoft YaHei UI", 9, "bold"),
-            ).pack(fill="x")
+            )
+            heading_label.pack(fill="x")
+            self._bind_wrap(
+                heading_label,
+                reserve=20,
+                minimum=220,
+                maximum=310,
+            )
             guide = tk.Label(
                 card,
                 text=text,
@@ -2031,6 +2047,71 @@ class WorldCupFloatApp:
     def _finish_ai_prewarm(self) -> None:
         self.ai_prewarm_running = False
         self._refresh_ai_cache_status()
+
+    def _schedule_roster_name_prewarm(self, snapshot: Snapshot) -> None:
+        competition_key = snapshot.competition_key
+        last_loaded = self.roster_name_prewarmed_at.get(competition_key, 0.0)
+        if (
+            competition_key in self.roster_name_prewarm_running
+            or time.time() - last_loaded < self.roster_refresh_hours_var.get() * 3600
+        ):
+            return
+        self.roster_name_prewarm_running.add(competition_key)
+        provider = DataProvider(
+            cache_dir=self.provider.cache_dir,
+            competition_key=competition_key,
+        )
+        provider.teams = snapshot.teams
+        provider.season_year = snapshot.season_year
+        provider.season_name = snapshot.season_name
+        teams = list(snapshot.teams.values())
+        roster_ttl_hours = self.roster_refresh_hours_var.get()
+
+        def load_team(team: Team) -> tuple[str, list[Player]]:
+            players, _error = provider.get_roster(
+                team.id,
+                season_year=snapshot.season_year,
+                ttl_hours=roster_ttl_hours,
+            )
+            return team.id, players
+
+        def worker() -> None:
+            loaded: dict[tuple[str, str], list[Player]] = {}
+            names: list[str] = []
+            try:
+                with ThreadPoolExecutor(max_workers=4) as executor:
+                    for team_id, players in executor.map(load_team, teams):
+                        if not players:
+                            continue
+                        loaded[self._roster_key(team_id, competition_key)] = players
+                        names.extend(player.name for player in players if player.name)
+            finally:
+                self._post_ui(
+                    lambda rows=loaded, player_names=names, key=competition_key:
+                    self._apply_roster_name_prewarm(key, rows, player_names)
+                )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_roster_name_prewarm(
+        self,
+        competition_key: str,
+        rosters: dict[tuple[str, str], list[Player]],
+        names: list[str],
+    ) -> None:
+        self.roster_name_prewarm_running.discard(competition_key)
+        self.roster_name_prewarmed_at[competition_key] = time.time()
+        now = time.time()
+        for roster_key, players in rosters.items():
+            self.rosters[roster_key] = players
+            self.roster_loaded_at[roster_key] = now
+        missing = [
+            name
+            for name in dict.fromkeys(names)
+            if self.localizer.player(name) == name
+        ]
+        if missing:
+            self._request_name_localization("player", missing)
 
     def _version_tuple(self, value: str) -> tuple[int, ...]:
         parts = []
@@ -3966,6 +4047,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 if self.localizer.team(team.name, team.abbreviation) == team.name
             ],
         )
+        self._schedule_roster_name_prewarm(snapshot)
         self._refresh_live_commentary(snapshot)
         if snapshot.competition_kind == "league":
             self._load_professional_boards(snapshot)
@@ -3975,7 +4057,12 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         for match in snapshot.matches:
             if match.id in ended_ids and match.completed:
                 self._load_complete_detail_commentary(match, request_summary=True)
-            if match.id == self.match_popup_match_id and match.is_live:
+            if (
+                match.id == self.match_popup_match_id
+                and match.is_live
+                and match.id not in self.detail_commentary_snapshots
+                and match.id not in self.detail_commentary_loading
+            ):
                 self._load_complete_detail_commentary(match)
         self._sync_match_notification(
             snapshot,
@@ -4283,6 +4370,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         translate_raw = bool(self.ai_translate_raw_var.get())
         free_translate = bool(self.free_translate_var.get())
         api_key = self._current_ai_credential()
+        ai_slot = bool(
+            api_key
+            and (use_ai or translate_raw)
+            and match.id not in self.commentary_ai_loading
+        )
+        if ai_slot:
+            self.commentary_ai_loading.add(match.id)
 
         def worker() -> None:
             entries, _detail, error = self.provider.get_match_commentary(
@@ -4292,11 +4386,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             )
             mode = "narration_v3" if use_ai else "translations"
             translations = self.commentary_service.event_texts(match.id, mode=mode)
+            translations.update(
+                self.commentary_service.event_texts(
+                    match.id,
+                    mode="detail_narration_v4",
+                )
+            )
             ai_error = ""
-            ai_requested = bool(entries and api_key and (use_ai or translate_raw))
+            ai_requested = bool(entries and ai_slot)
             immediate = dict(translations)
-            for entry in entries[-6:]:
-                immediate.setdefault(entry.sequence, entry.text)
+            if not (use_ai or translate_raw or free_translate):
+                for entry in entries[-6:]:
+                    immediate.setdefault(entry.sequence, entry.text)
             self._post_ui(
                 lambda current=match, rows=entries, texts=immediate, detail_error=error:
                 self._apply_commentary_source_result(current, rows, texts, detail_error or "")
@@ -4319,13 +4420,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     except Exception:
                         translations[entry.sequence] = entry.text
             self._post_ui(
-                lambda current=match, rows=entries, texts=translations, detail_error=error, model_error=ai_error, summarize=request_summary:
+                lambda current=match, rows=entries, texts=translations, detail_error=error, model_error=ai_error, summarize=request_summary, owns_ai_slot=ai_slot:
                 self._apply_commentary_result(
                     current,
                     rows,
                     texts,
                     detail_error or model_error or "",
                     request_summary=summarize,
+                    release_ai_slot=owns_ai_slot,
                 )
             )
 
@@ -4350,16 +4452,15 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         translations: dict[int, str],
         error: str,
     ) -> None:
-        if entries:
-            self.commentary_entries[match.id] = entries
-        self.commentary_texts[match.id] = translations
+        self.commentary_loading.discard(match.id)
+        self._merge_commentary_entries(match.id, entries)
+        self._merge_commentary_texts(match.id, translations)
         if error:
             self.commentary_errors[match.id] = error
         else:
             self.commentary_errors.pop(match.id, None)
         self._update_commentary_labels(match.id)
         self._render_detail_commentary(match)
-        self._speak_new_commentary(match)
 
     def _apply_commentary_result(
         self,
@@ -4368,17 +4469,20 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         translations: dict[int, str],
         error: str,
         request_summary: bool = False,
+        release_ai_slot: bool = False,
     ) -> None:
         self.commentary_loading.discard(match.id)
-        if entries:
-            self.commentary_entries[match.id] = entries
-        self.commentary_texts[match.id] = translations
+        if release_ai_slot:
+            self.commentary_ai_loading.discard(match.id)
+        self._merge_commentary_entries(match.id, entries)
+        self._merge_commentary_texts(match.id, translations)
         if error:
             self.commentary_errors[match.id] = error
         else:
             self.commentary_errors.pop(match.id, None)
         self._update_commentary_labels(match.id)
         self._render_detail_commentary(match)
+        self._speak_new_commentary(match)
         should_summarize = request_summary or match.id in self.summary_requested
         self.summary_requested.discard(match.id)
         latest_match = next(
@@ -4403,18 +4507,70 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 3600,
                 lambda current=latest_match: self._load_match_commentary(current, force=False),
             )
-        if detail_open:
+        if (
+            detail_open
+            and latest_match.id not in self.detail_commentary_snapshots
+            and latest_match.id not in self.detail_commentary_loading
+        ):
             self._load_complete_detail_commentary(
                 latest_match,
                 request_summary=latest_match.completed,
             )
+        elif (
+            latest_match.is_live
+            and latest_match.id not in self.live_detail_prewarmed
+            and latest_match.id not in self.detail_commentary_loading
+        ):
+            self.live_detail_prewarmed.add(latest_match.id)
+            self.root.after(
+                80,
+                lambda current=latest_match:
+                self._load_complete_detail_commentary(
+                    current,
+                    background=True,
+                ),
+            )
+
+    def _merge_commentary_entries(
+        self,
+        match_id: str,
+        entries: list[CommentaryEntry],
+    ) -> None:
+        if not entries:
+            return
+        merged = {
+            entry.sequence: entry
+            for entry in self.commentary_entries.get(match_id, [])
+        }
+        merged.update({entry.sequence: entry for entry in entries})
+        self.commentary_entries[match_id] = [
+            merged[sequence]
+            for sequence in sorted(merged)
+        ]
+
+    def _merge_commentary_texts(
+        self,
+        match_id: str,
+        translations: dict[int, str],
+    ) -> None:
+        merged = dict(self.commentary_texts.get(match_id, {}))
+        merged.update(
+            {
+                sequence: text
+                for sequence, text in translations.items()
+                if str(text or "").strip()
+            }
+        )
+        self.commentary_texts[match_id] = merged
 
     def _speak_new_commentary(self, match: Match) -> None:
         if not self.tts_enabled_var.get() or not match.is_live:
             return
         entries = [
             entry for entry in self.commentary_entries.get(match.id, [])
-            if self._commentary_text(match.id, entry)
+            if self._is_chinese_commentary(
+                self.commentary_texts.get(match.id, {}).get(entry.sequence, "")
+            )
         ]
         if not entries:
             return
@@ -4425,7 +4581,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         else:
             pending = [entry for entry in entries if entry.sequence > previous]
         for entry in pending[-3:]:
-            text = self._commentary_text(match.id, entry).strip()
+            text = self._localize_commentary_names(
+                self.commentary_texts.get(match.id, {}).get(entry.sequence, "")
+            ).strip()
             minute = str(entry.minute or "").strip()
             if minute and text.startswith(minute):
                 text = text[len(minute):].lstrip(" ：:.-—")
@@ -4437,10 +4595,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 )
         self.spoken_commentary_sequences[match.id] = entries[-1].sequence
 
+    @staticmethod
+    def _is_chinese_commentary(text: str) -> bool:
+        value = str(text or "")
+        chinese_count = len(re.findall(r"[\u3400-\u9fff]", value))
+        latin_count = len(re.findall(r"[A-Za-z]", value))
+        return chinese_count >= 2 and latin_count <= chinese_count * 3
+
     def _load_complete_detail_commentary(
         self,
         match: Match,
         request_summary: bool = False,
+        background: bool = False,
     ) -> None:
         if request_summary:
             self.summary_requested.add(match.id)
@@ -4451,6 +4617,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._render_detail_commentary(match)
         api_key = self._current_ai_credential()
         free_translate = self.free_translate_var.get()
+        current_texts = dict(self.commentary_texts.get(match.id, {}))
 
         def worker() -> None:
             entries, _detail, source_error = self.provider.get_match_commentary(
@@ -4458,36 +4625,80 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 live=match.is_live,
                 force=match.is_live,
             )
-            translations: dict[int, str] = {}
+            translations: dict[int, str] = (
+                self.commentary_service.event_texts(
+                    match.id,
+                    mode="detail_narration_v4",
+                )
+            )
+            translations.update(
+                {
+                    sequence: text
+                    for sequence, text in current_texts.items()
+                    if self._is_chinese_commentary(text)
+                }
+            )
             error = source_error or ""
-            if not error and entries and api_key:
+            missing_entries = [
+                entry
+                for entry in entries
+                if entry.sequence not in translations
+            ]
+            if (
+                not error
+                and missing_entries
+                and background
+                and match.is_live
+                and free_translate
+            ):
                 try:
-                    translations = self.commentary_service.translate_complete_timeline(
+                    glossary = self._commentary_glossary(
+                        match,
+                        missing_entries,
+                    )
+                    rows = self.free_translation_service.translate_many(
+                        [entry.text for entry in missing_entries],
+                        glossary,
+                    )
+                    translations.update(
+                        {
+                            entry.sequence: text
+                            for entry, text in zip(missing_entries, rows)
+                            if self._is_chinese_commentary(text)
+                        }
+                    )
+                except Exception as exc:
+                    error = self._friendly_commentary_error(exc)
+            elif not error and missing_entries and api_key:
+                try:
+                    translations.update(
+                        self.commentary_service.translate_complete_timeline(
                         match,
                         entries,
                         api_key,
+                        )
                     )
                 except Exception as exc:
                     error = self._friendly_commentary_error(exc)
-                    translations = {
-                        entry.sequence: entry.text
-                        for entry in entries
-                    }
-            elif not error and entries and free_translate:
+            elif not error and missing_entries and free_translate:
                 try:
-                    glossary = self._commentary_glossary(match, entries)
+                    glossary = self._commentary_glossary(
+                        match,
+                        missing_entries,
+                    )
                     rows = self.free_translation_service.translate_many(
-                        [entry.text for entry in entries],
+                        [entry.text for entry in missing_entries],
                         glossary,
                     )
-                    translations = {
-                        entry.sequence: text
-                        for entry, text in zip(entries, rows)
-                    }
+                    translations.update(
+                        {
+                            entry.sequence: text
+                            for entry, text in zip(missing_entries, rows)
+                        }
+                    )
                 except Exception as exc:
                     error = self._friendly_commentary_error(exc)
-                    translations = {entry.sequence: entry.text for entry in entries}
-            elif not error and not api_key:
+            elif not error and missing_entries and not api_key:
                 error = "未设置 AI API Key，且免费中文翻译未开启"
             self._post_ui(
                 lambda current=match, rows=entries, texts=translations, detail_error=error, summarize=request_summary:
@@ -4511,28 +4722,51 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         request_summary: bool = False,
     ) -> None:
         self.detail_commentary_loading.discard(match.id)
-        complete = bool(entries) and all(entry.sequence in translations for entry in entries)
+        valid_texts = {
+            entry.sequence: translations[entry.sequence]
+            for entry in entries
+            if (
+                entry.sequence in translations
+                and self._is_chinese_commentary(translations[entry.sequence])
+            )
+        }
+        if valid_texts:
+            ordered_entries = [
+                entry
+                for entry in sorted(entries, key=lambda row: row.sequence)
+                if entry.sequence in valid_texts
+            ]
+            self.detail_commentary_snapshots[match.id] = (
+                ordered_entries,
+                valid_texts,
+            )
+            self._merge_commentary_entries(match.id, entries)
+            self._merge_commentary_texts(match.id, valid_texts)
+        complete = bool(entries) and len(valid_texts) == len(entries)
         if complete:
-            ordered_entries = sorted(entries, key=lambda entry: entry.sequence)
-            complete_texts = {
-                entry.sequence: translations[entry.sequence]
-                for entry in ordered_entries
-            }
-            self.detail_commentary_snapshots[match.id] = (ordered_entries, complete_texts)
-            self.commentary_entries[match.id] = ordered_entries
+            self.live_detail_prewarmed.add(match.id)
             if error:
                 self.detail_commentary_errors[match.id] = error
             else:
                 self.detail_commentary_errors.pop(match.id, None)
         elif error:
             self.detail_commentary_errors[match.id] = error
+        elif match.is_live and valid_texts:
+            self.detail_commentary_errors.pop(match.id, None)
         else:
             self.detail_commentary_errors[match.id] = "完整中文时间线尚未生成"
+        if not complete and match.is_live:
+            self.root.after(
+                60000,
+                lambda match_id=match.id:
+                self.live_detail_prewarmed.discard(match_id),
+            )
+        self._update_commentary_labels(match.id)
         self._render_detail_commentary(match)
         should_summarize = request_summary or match.id in self.summary_requested
         self.summary_requested.discard(match.id)
         if should_summarize and match.completed and entries:
-            self.commentary_entries[match.id] = entries
+            self._merge_commentary_entries(match.id, entries)
             self._request_match_summary(match)
 
     def _request_match_summary(self, match: Match) -> None:
@@ -4577,10 +4811,42 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if self._commentary_ai_mode():
             translated = self.commentary_texts.get(match_id, {}).get(entry.sequence)
             if translated:
-                return translated
+                return self._localize_commentary_names(translated)
             if not self.commentary_errors.get(match_id):
                 return ""
-        return entry.text
+        return self._localize_commentary_names(entry.text)
+
+    def _localize_commentary_names(self, text: str) -> str:
+        value = str(text or "")
+        if not value or self.use_english_var.get():
+            return value
+        mappings = {
+            **self.localizer.teams_by_name,
+            **self.localizer.players,
+        }
+        candidates = [
+            (source, target)
+            for source, target in mappings.items()
+            if (
+                source
+                and target
+                and source != target
+                and len(source) >= 4
+                and source.casefold() in value.casefold()
+            )
+        ]
+        for source, target in sorted(
+            candidates,
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            value = re.sub(
+                rf"(?<![\w]){re.escape(source)}(?![\w])",
+                target,
+                value,
+                flags=re.IGNORECASE,
+            )
+        return value
 
     @staticmethod
     def _friendly_commentary_error(error: Exception | str) -> str:
@@ -4605,12 +4871,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             or self.free_translate_var.get()
         )
 
-    def _commentary_line(self, match_id: str, entry: CommentaryEntry, limit: int = 38) -> str:
+    def _commentary_line(self, match_id: str, entry: CommentaryEntry) -> str:
         prefix = f"{entry.minute} " if entry.minute else ""
-        text = f"{prefix}{self._commentary_text(match_id, entry)}".strip()
-        if len(text) > limit:
-            return text[: max(1, limit - 1)].rstrip() + "…"
-        return text
+        return f"{prefix}{self._commentary_text(match_id, entry)}".strip()
 
     @staticmethod
     def _commentary_emphasis(entry: CommentaryEntry) -> tuple[str, bool]:
@@ -4709,17 +4972,17 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 text="",
                 bg=BG,
                 fg=MUTED,
-                anchor="w",
+                anchor="nw",
                 justify="left",
-                height=1,
                 font=("Microsoft YaHei UI", 8),
                 cursor="hand2",
             )
             label.pack(fill="x", pady=1)
+            self._bind_wrap(label, reserve=8, minimum=96, maximum=420)
             labels.append(label)
-            self._bind_match_open(label, match)
+            self._bind_commentary_open(label, match)
         self.commentary_labels[match.id] = labels
-        self._bind_match_open(panel, match)
+        self._bind_commentary_open(panel, match)
         self._update_commentary_labels(match.id)
 
     def render_upcoming(self) -> None:
@@ -6242,6 +6505,22 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
         self._bind_click(widget, toggle_detail)
 
+    def _bind_commentary_open(self, widget: tk.Widget, match: Match) -> None:
+        widget.configure(cursor="hand2")
+
+        def toggle_commentary(_event: tk.Event, current: Match = match) -> None:
+            if (
+                self.match_popup is not None
+                and self.match_popup.winfo_exists()
+                and self.match_popup_match_id == current.id
+                and self.match_popup_mode == "commentary"
+            ):
+                self._close_match_popup()
+                return
+            self._open_commentary_detail(current)
+
+        self._bind_click(widget, toggle_commentary)
+
     def _close_match_popup(self, popup: tk.Toplevel | None = None) -> None:
         popup = popup or self.match_popup
         if popup is not None and popup.winfo_exists():
@@ -6249,6 +6528,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if popup is self.match_popup or popup is None:
             self.match_popup = None
             self.match_popup_match_id = ""
+            self.match_popup_mode = ""
             self.match_detail_scroll = None
             self.detail_commentary_panels.clear()
             self.detail_summary_labels.clear()
@@ -6438,6 +6718,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         popup = tk.Toplevel(self.root)
         self.match_popup = popup
         self.match_popup_match_id = match.id
+        self.match_popup_mode = "match"
         popup.overrideredirect(True)
         popup.configure(bg=PANEL)
         popup.attributes("-topmost", True)
@@ -6446,6 +6727,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             if event.widget is current and self.match_popup is current:
                 self.match_popup = None
                 self.match_popup_match_id = ""
+                self.match_popup_mode = ""
                 self.match_detail_scroll = None
                 self.detail_commentary_panels.clear()
                 self.detail_summary_labels.clear()
@@ -6479,6 +6761,101 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             match,
             request_summary=match.completed,
         )
+
+    def _open_commentary_detail(self, match: Match) -> None:
+        if self.match_popup is not None and self.match_popup.winfo_exists():
+            self._close_match_popup()
+        self._prepare_single_popup(clear_history=True)
+        self.match_popup_opening = True
+        self.root.after_idle(lambda: setattr(self, "match_popup_opening", False))
+        popup = tk.Toplevel(self.root)
+        self.match_popup = popup
+        self.match_popup_match_id = match.id
+        self.match_popup_mode = "commentary"
+        popup.overrideredirect(True)
+        popup.configure(bg=PANEL)
+        popup.attributes("-topmost", True)
+        popup.attributes("-alpha", 0.97)
+
+        def clear_popup_reference(
+            event: tk.Event,
+            current: tk.Toplevel = popup,
+        ) -> None:
+            if event.widget is current and self.match_popup is current:
+                self.match_popup = None
+                self.match_popup_match_id = ""
+                self.match_popup_mode = ""
+                self.match_detail_scroll = None
+                self.detail_commentary_panels.clear()
+
+        popup.bind("<Destroy>", clear_popup_reference, add="+")
+        width = min(360, max(292, self.root.winfo_width() - 12))
+        height = min(540, max(360, self.root.winfo_height() - 24))
+        x = min(
+            max(8, self.root.winfo_x() + 6),
+            max(8, self.root.winfo_screenwidth() - width - 8),
+        )
+        y = min(
+            max(8, self.root.winfo_y() + 18),
+            max(8, self.root.winfo_screenheight() - height - 48),
+        )
+        popup.geometry(f"{width}x{height}+{x}+{y}")
+
+        header = tk.Frame(popup, bg=PANEL, padx=12, pady=10)
+        header.pack(fill="x")
+        header_label = tk.Label(
+            header,
+            text="直播文字解说",
+            bg=PANEL,
+            fg=ACCENT,
+            font=("Microsoft YaHei UI", 11, "bold"),
+        )
+        header_label.pack(side="left")
+        close = tk.Label(
+            header,
+            text="×",
+            bg=PANEL,
+            fg=MUTED,
+            cursor="hand2",
+            font=("Microsoft YaHei UI", 13, "bold"),
+        )
+        close.pack(side="right")
+        self._bind_click(close, lambda _event: self._close_match_popup())
+        self._bind_drag(header)
+        self._bind_drag(header_label)
+
+        body = ScrollFrame(popup, bg=PANEL)
+        self.match_detail_scroll = body
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        title = (
+            f"{self._team_text(match.home)}  {self._scoreline(match)}  "
+            f"{self._team_text(match.away)}"
+        )
+        title_label = tk.Label(
+            body.body,
+            text=title,
+            bg=PANEL,
+            fg=TEXT,
+            anchor="w",
+            justify="left",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        )
+        title_label.pack(fill="x", pady=(0, 4))
+        self._bind_wrap(title_label, reserve=8, minimum=140, maximum=330)
+        status_label = tk.Label(
+            body.body,
+            text=f"LIVE {match.status_text}" if match.is_live else match.status_text,
+            bg=PANEL,
+            fg=LIVE if match.is_live else MUTED,
+            anchor="w",
+            justify="left",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        status_label.pack(fill="x", pady=(0, 5))
+        self._bind_wrap(status_label, reserve=8, minimum=140, maximum=330)
+        self._match_commentary_panel(body.body, match)
+        self._apply_fonts_to_tree(popup)
+        self._load_complete_detail_commentary(match)
 
     def _match_detail(self, parent: tk.Widget, match: Match) -> None:
         title = f"{self._team_text(match.home)}  {self._scoreline(match)}  {self._team_text(match.away)}"
@@ -6539,22 +6916,62 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         panel = self.detail_commentary_panels.get(match.id)
         if panel is None:
             return
+        scroll_state = self.commentary_scroll_states.setdefault(
+            match.id,
+            {
+                "top": 0.0,
+                "index": "1.0",
+                "at_bottom": True,
+                "dragging": False,
+                "pending_render": False,
+            },
+        )
+        if bool(scroll_state.get("dragging")):
+            scroll_state["pending_render"] = True
+            return
+        old_view: tuple[float, float] | None = None
         try:
             if not panel.winfo_exists():
                 self.detail_commentary_panels.pop(match.id, None)
                 return
             for child in panel.winfo_children():
-                child.destroy()
+                if isinstance(child, (tk.Listbox, tk.Text)):
+                    old_view = child.yview()
+                    scroll_state["top"] = old_view[0]
+                    scroll_state["at_bottom"] = old_view[1] >= 0.995
+                    if isinstance(child, tk.Text):
+                        scroll_state["index"] = child.index("@0,0")
+                    break
         except tk.TclError:
             return
         snapshot = self.detail_commentary_snapshots.get(match.id)
-        if snapshot is None:
+        merged_entries: dict[int, CommentaryEntry] = {}
+        merged_texts: dict[int, str] = {}
+        if snapshot is not None:
+            snapshot_entries, snapshot_texts = snapshot
+            for entry in snapshot_entries:
+                text = str(snapshot_texts.get(entry.sequence) or "").strip()
+                if text:
+                    merged_entries[entry.sequence] = entry
+                    merged_texts[entry.sequence] = text
+        for entry in self.commentary_entries.get(match.id, []):
+            text = self._commentary_text(match.id, entry).strip()
+            if text:
+                merged_entries[entry.sequence] = entry
+                merged_texts[entry.sequence] = text
+        if not merged_entries:
             if match.id in self.detail_commentary_loading:
-                text = "正在生成完整中文文字直播，完成后将一次性显示…"
+                text = "正在获取中文文字直播…"
             elif self.detail_commentary_errors.get(match.id):
                 text = f"完整中文文字直播暂时不可用：{self.detail_commentary_errors[match.id]}"
             else:
                 text = "正在准备完整中文文字直播…"
+            signature = ("status", text)
+            if getattr(panel, "_worldcup_commentary_signature", None) == signature:
+                return
+            panel._worldcup_commentary_signature = signature
+            for child in panel.winfo_children():
+                child.destroy()
             error_label = tk.Label(
                 panel,
                 text=text,
@@ -6566,8 +6983,30 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             error_label.pack(fill="x", pady=5)
             self._bind_wrap(error_label, reserve=4, minimum=120, maximum=306)
             return
-        visible_entries, translated = snapshot
+        visible_entries = [
+            merged_entries[sequence]
+            for sequence in sorted(merged_entries)
+        ]
+        translated = merged_texts
         notice = self.detail_commentary_errors.get(match.id)
+        signature = (
+            "timeline",
+            self.match_popup_mode,
+            notice,
+            tuple(
+                (
+                    entry.sequence,
+                    entry.minute,
+                    translated[entry.sequence],
+                )
+                for entry in visible_entries
+            ),
+        )
+        if getattr(panel, "_worldcup_commentary_signature", None) == signature:
+            return
+        panel._worldcup_commentary_signature = signature
+        for child in panel.winfo_children():
+            child.destroy()
         if notice:
             notice_label = tk.Label(
                 panel,
@@ -6586,46 +7025,79 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             family=self.ui_font_var.get() or "Microsoft YaHei UI",
             size=8,
         )
-        timeline = tk.Listbox(
+        timeline = tk.Text(
             panel,
             bg=PANEL_2,
             fg=TEXT,
-            selectbackground=PANEL_3,
-            selectforeground=TEXT,
             width=1,
-            height=8,
+            height=14 if self.match_popup_mode == "commentary" else 8,
+            wrap="char",
             relief="flat",
             bd=0,
             highlightthickness=1,
             highlightbackground=LINE,
             font=timeline_font,
             cursor="arrow",
-            activestyle="none",
-            exportselection=False,
             takefocus=False,
+            padx=6,
+            pady=5,
+            spacing1=1,
+            spacing3=2,
         )
-        timeline.pack(fill="x", ipady=3)
+        timeline.pack(fill="x")
         timeline._worldcup_font = timeline_font
-        panel_width = panel.winfo_width()
-        if panel_width <= 1 and self.match_popup is not None:
-            panel_width = self.match_popup.winfo_width() - 24
-        content_width = max(126, panel_width - 20)
+        timeline.tag_configure("normal", foreground=TEXT)
+        timeline.tag_configure("muted", foreground=MUTED)
+        timeline.tag_configure("live", foreground=LIVE)
+        timeline.tag_configure("accent", foreground=ACCENT)
+        timeline.tag_configure("warning", foreground=WARNING)
         for entry in visible_entries:
             emphasis_color, _emphasized = self._commentary_emphasis(entry)
-            item_color = emphasis_color or TEXT
-            prefix = f"{entry.minute or '·'}  "
-            continuation_prefix = " " * max(2, len(entry.minute or "·") + 2)
-            lines = self._wrap_text_by_pixels(
-                translated[entry.sequence],
-                timeline_font,
-                max(52, content_width - timeline_font.measure(prefix)),
-                max(52, content_width - timeline_font.measure(continuation_prefix)),
+            tag = (
+                "live" if emphasis_color == LIVE else
+                "accent" if emphasis_color == ACCENT else
+                "warning" if emphasis_color == WARNING else
+                "normal"
             )
-            timeline.insert("end", f"{prefix}{lines[0]}")
-            timeline.itemconfig("end", foreground=item_color)
-            for continuation in lines[1:]:
-                timeline.insert("end", f"{continuation_prefix}{continuation}")
-                timeline.itemconfig("end", foreground=item_color)
+            text = self._localize_commentary_names(
+                translated[entry.sequence]
+            )
+            timeline.insert(
+                "end",
+                f"{entry.minute or '·'}  {text}\n",
+                tag,
+            )
+        timeline.configure(state="disabled")
+        keep_bottom = bool(scroll_state.get("at_bottom", True))
+        saved_top = float(scroll_state.get("top", 0.0) or 0.0)
+        saved_index = str(scroll_state.get("index") or "1.0")
+
+        def restore_timeline_position() -> None:
+            try:
+                if keep_bottom:
+                    timeline.yview_moveto(1.0)
+                else:
+                    try:
+                        timeline.yview(saved_index)
+                    except tk.TclError:
+                        timeline.yview_moveto(saved_top)
+                top, bottom = timeline.yview()
+                scroll_state["top"] = top
+                scroll_state["at_bottom"] = bottom >= 0.995
+                scroll_state["index"] = timeline.index("@0,0")
+            except tk.TclError:
+                pass
+
+        timeline.after_idle(restore_timeline_position)
+
+        def remember_position() -> None:
+            try:
+                top, bottom = timeline.yview()
+            except tk.TclError:
+                return
+            scroll_state["top"] = top
+            scroll_state["at_bottom"] = bottom >= 0.995
+            scroll_state["index"] = timeline.index("@0,0")
 
         def scroll_text(event: tk.Event) -> str:
             direction = -1 if event.delta > 0 else 1
@@ -6634,32 +7106,32 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             if at_boundary and self.match_detail_scroll is not None:
                 self.match_detail_scroll.canvas.yview_scroll(direction * 3, "units")
             else:
-                timeline.yview_scroll(direction, "units")
+                timeline.yview_scroll(direction * 2, "units")
+                remember_position()
             return "break"
 
         drag_state = {
             "active": False,
-            "start_y": 0,
-            "start_top": 0,
             "moved": False,
-            "watchdog": None,
+            "start_y": 0,
+            "start_top": 0.0,
+            "content_pixels": 1,
         }
 
-        def stop_drag(_event: tk.Event | None = None) -> str:
+        def stop_drag(
+            _event: tk.Event | None = None,
+            render_pending: bool = True,
+        ) -> str:
             drag_state["active"] = False
-            watchdog = drag_state.get("watchdog")
-            drag_state["watchdog"] = None
-            if watchdog is not None:
-                try:
-                    timeline.after_cancel(watchdog)
-                except tk.TclError:
-                    pass
-            try:
-                if timeline.grab_current() == timeline:
-                    timeline.grab_release()
-                timeline.selection_clear(0, "end")
-            except tk.TclError:
-                pass
+            scroll_state["dragging"] = False
+            remember_position()
+            if (
+                render_pending
+                and bool(scroll_state.pop("pending_render", False))
+            ):
+                self.root.after_idle(
+                    lambda current=match: self._render_detail_commentary(current)
+                )
             return "break"
 
         def pointer_inside(x_root: int, y_root: int) -> bool:
@@ -6673,49 +7145,31 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             except tk.TclError:
                 return False
 
-        def left_button_down() -> bool:
-            if sys.platform.startswith("win"):
-                try:
-                    return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
-                except Exception:
-                    pass
-            try:
-                return bool(self.root.tk.call("tk", "windowingsystem")) and drag_state["active"]
-            except tk.TclError:
-                return False
-
-        def watch_drag() -> None:
-            drag_state["watchdog"] = None
-            if not drag_state["active"]:
-                return
-            if not left_button_down():
-                stop_drag()
-                return
-            try:
-                x_root = timeline.winfo_pointerx()
-                y_root = timeline.winfo_pointery()
-            except tk.TclError:
-                stop_drag()
-                return
-            if not pointer_inside(x_root, y_root):
-                stop_drag()
-                return
-            try:
-                drag_state["watchdog"] = timeline.after(24, watch_drag)
-            except tk.TclError:
-                stop_drag()
-
         def start_drag(event: tk.Event) -> str:
             drag_state["active"] = True
-            drag_state["start_y"] = event.y_root
-            drag_state["start_top"] = timeline.nearest(0)
+            scroll_state["dragging"] = True
+            scroll_state["pending_render"] = False
             drag_state["moved"] = False
-            timeline.selection_clear(0, "end")
             try:
-                timeline.grab_set()
-                drag_state["watchdog"] = timeline.after(24, watch_drag)
+                drag_state["start_y"] = event.y_root
+                drag_state["start_top"] = timeline.yview()[0]
+                display_lines = int(
+                    timeline.count(
+                        "1.0",
+                        "end-1c",
+                        "displaylines",
+                    )[0]
+                    or 1
+                )
+                drag_state["content_pixels"] = max(
+                    timeline.winfo_height() + 1,
+                    display_lines
+                    * max(1, timeline_font.metrics("linespace"))
+                    + 10,
+                )
             except tk.TclError:
                 drag_state["active"] = False
+                scroll_state["dragging"] = False
             return "break"
 
         def drag_text(event: tk.Event) -> str:
@@ -6723,49 +7177,32 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 return "break"
             if not pointer_inside(event.x_root, event.y_root):
                 return stop_drag(event)
-            delta = event.y_root - drag_state["start_y"]
-            if abs(delta) < 3:
-                return "break"
             drag_state["moved"] = True
-            line_height = max(1, timeline_font.metrics("linespace"))
-            target = drag_state["start_top"] - round(delta / line_height)
-            item_count = max(1, timeline.size())
-            visible_rows = max(1, int(timeline.cget("height")))
-            target = max(0, min(target, max(0, item_count - visible_rows)))
-            timeline.yview_moveto(target / item_count)
+            try:
+                delta = event.y_root - int(drag_state["start_y"])
+                target = (
+                    float(drag_state["start_top"])
+                    - delta / max(1, int(drag_state["content_pixels"]))
+                )
+                timeline.yview_moveto(max(0.0, min(1.0, target)))
+            except (tk.TclError, TypeError, ValueError):
+                return stop_drag(event)
+            remember_position()
             return "break"
 
         timeline.bind("<MouseWheel>", scroll_text)
         timeline.bind("<ButtonPress-1>", start_drag)
         timeline.bind("<B1-Motion>", drag_text)
         timeline.bind("<ButtonRelease-1>", stop_drag)
-        timeline.bind("<FocusOut>", stop_drag)
-        timeline.bind("<Destroy>", stop_drag)
-
-    @staticmethod
-    def _wrap_text_by_pixels(
-        text: str,
-        font: tkfont.Font,
-        first_width: int,
-        continuation_width: int,
-    ) -> list[str]:
-        value = " ".join(str(text or "").split())
-        if not value:
-            return [""]
-        lines: list[str] = []
-        current = ""
-        limit = first_width
-        for character in value:
-            candidate = current + character
-            if current and font.measure(candidate) > limit:
-                lines.append(current.rstrip())
-                current = character.lstrip()
-                limit = continuation_width
-            else:
-                current = candidate
-        if current or not lines:
-            lines.append(current.rstrip())
-        return lines
+        timeline.bind(
+            "<Leave>",
+            lambda event: stop_drag(event)
+            if drag_state["active"] else None,
+        )
+        timeline.bind(
+            "<Destroy>",
+            lambda event: stop_drag(event, render_pending=False),
+        )
 
     def _match_summary_panel(self, parent: tk.Widget, match: Match) -> None:
         tk.Label(
@@ -7470,6 +7907,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if translated:
             self._save_name_localization_cache()
             self._invalidate_render_cache()
+            self._update_all_commentary_labels()
             if self.snapshot:
                 self.render_active()
 
