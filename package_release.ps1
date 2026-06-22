@@ -7,6 +7,7 @@ $version = [string]$versionInfo.version
 $publishRoot = Join-Path $projectDir "publish"
 $releaseRoot = Join-Path $publishRoot "v$version"
 $portableDir = Join-Path $releaseRoot "WorldCupFloat_Portable"
+$localDir = Join-Path $releaseRoot "WorldCupFloat_Local"
 $archivePath = Join-Path $releaseRoot "WorldCupFloat_Portable.zip"
 $shareArchivePath = Join-Path $releaseRoot "WorldCup_Realtime_Data_v${version}_Share.zip"
 
@@ -78,5 +79,8 @@ if ($containsSecret) {
 
 Compress-Archive -LiteralPath $portableDir -DestinationPath $archivePath -CompressionLevel Optimal
 Copy-Item -LiteralPath $archivePath -Destination $shareArchivePath
+Copy-Item -LiteralPath $portableDir -Destination $localDir -Recurse
+Copy-Item -LiteralPath (Join-Path $projectDir "secrets.json") -Destination $localDir -Force
 Write-Output "Packaged: $archivePath"
 Write-Output "Share package: $shareArchivePath"
+Write-Output "Local private package: $localDir"

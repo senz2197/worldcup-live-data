@@ -56,6 +56,8 @@ WorldCupFloat_Portable.zip
 - World Cup and league news tabs with one-to-twelve-week filtering, favorite-team priority, translated summaries, and original-source links
 - Startup news prewarming prioritizes the active favorite-team competition, then other favorites, then the last active competition; opening a queued news tab promotes it to the next task
 - AI-first Chinese news rewriting with full ESPN article retrieval and free translation fallback
+- News translations are invalidated whenever ESPN changes the source headline or summary, preventing stale mistranslations from being reused
+- Football headline shorthand such as `strike` and `double` is disambiguated from article context before translation
 - News cards and details never fall back to displaying untranslated English copy
 - Free machine translation fallback for commentary and news when AI is disabled or unavailable
 - Player rosters refresh every 24 hours by default, with a configurable interval

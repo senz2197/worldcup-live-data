@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.8"
+APP_VERSION = "1.5.9"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -5550,6 +5550,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 self.news_service.cached_translation(
                     item.id,
                     require_ai=bool(api_key),
+                    source_title=item.title,
+                    source_summary=item.summary,
                 )
             )
             if item.translated_title:
@@ -5592,7 +5594,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                             [
                                 {
                                     "id": item.id,
-                                    "title": item.title,
+                                    "title": self._normalize_news_source_title(
+                                        item.title,
+                                        self._news_glossary(item),
+                                    ),
                                     "summary": item.summary,
                                 }
                                 for item in batch
@@ -5616,7 +5621,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             texts = [
                 text
                 for item in unresolved
-                for text in (item.title, item.summary)
+                for text in (
+                    self._normalize_news_source_title(
+                        item.title,
+                        self._news_glossary(item),
+                    ),
+                    item.summary,
+                )
             ]
             try:
                 translated_rows = (
@@ -5669,6 +5680,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     item.translated_title,
                     item.translated_summary,
                     provider=provider,
+                    source_title=item.title,
+                    source_summary=item.summary,
                 )
             else:
                 item.translated_title = "资讯中文化暂时不可用"
@@ -5699,6 +5712,30 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             for source, target in mappings.items()
             if len(source) >= 3 and source.casefold() in text
         }
+
+    @staticmethod
+    def _normalize_news_source_title(
+        title: str,
+        glossary: dict[str, str],
+    ) -> str:
+        result = " ".join(str(title or "").split())
+        for source in sorted(glossary, key=len, reverse=True):
+            if not source:
+                continue
+            escaped = re.escape(source)
+            result = re.sub(
+                rf"\bafter\s+{escaped}\s+strike\b",
+                f"after scoring against {source}",
+                result,
+                flags=re.IGNORECASE,
+            )
+            result = re.sub(
+                rf"\bafter\s+{escaped}\s+double\b",
+                f"after scoring twice against {source}",
+                result,
+                flags=re.IGNORECASE,
+            )
+        return result
 
     @staticmethod
     def _enforce_glossary(text: str, glossary: dict[str, str]) -> str:

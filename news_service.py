@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 
-NEWS_TRANSLATION_VERSION = 2
+NEWS_TRANSLATION_VERSION = 3
 
 
 class _ArticleTextParser(HTMLParser):
@@ -307,10 +307,18 @@ class NewsService:
         self,
         item_id: str,
         require_ai: bool = False,
+        source_title: str = "",
+        source_summary: str = "",
     ) -> tuple[str, str]:
         with self.translation_lock:
             row = self.translations.get(str(item_id)) or {}
         if int(row.get("version") or 0) != NEWS_TRANSLATION_VERSION:
+            return "", ""
+        if (
+            source_title
+            and row.get("source_signature")
+            != self._source_signature(source_title, source_summary)
+        ):
             return "", ""
         if require_ai and row.get("list_provider") != "ai":
             return "", ""
@@ -331,6 +339,8 @@ class NewsService:
         title: str,
         summary: str,
         provider: str,
+        source_title: str = "",
+        source_summary: str = "",
     ) -> None:
         if not title:
             return
@@ -341,10 +351,25 @@ class NewsService:
                 "title": title,
                 "summary": summary,
                 "list_provider": provider,
+                "source_signature": self._source_signature(
+                    source_title,
+                    source_summary,
+                ),
                 "updated_at": int(time.time()),
             })
             self.translations[str(item_id)] = row
             self._save_translations()
+
+    @staticmethod
+    def _source_signature(title: str, summary: str = "") -> str:
+        source = json.dumps(
+            [
+                " ".join(str(title or "").split()),
+                " ".join(str(summary or "").split()),
+            ],
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
     def store_content(self, item_id: str, content: str, provider: str) -> None:
         if not content:
