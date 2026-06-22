@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.12"
+APP_VERSION = "1.5.13"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -6963,6 +6963,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 "pending_render": False,
                 "interaction_revision": 0,
                 "anchor_sequence": None,
+                "manual_position": False,
             },
         )
         if bool(scroll_state.get("dragging")):
@@ -6977,25 +6978,30 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 if isinstance(child, (tk.Listbox, tk.Text)):
                     old_view = child.yview()
                     scroll_state["top"] = old_view[0]
-                    scroll_state["at_bottom"] = old_view[1] >= 0.995
+                    manual_position = bool(
+                        scroll_state.get("manual_position", False)
+                    )
+                    if not manual_position:
+                        scroll_state["at_bottom"] = old_view[1] >= 0.995
                     if isinstance(child, tk.Text):
                         anchor_index = child.index("@8,7")
                         scroll_state["index"] = anchor_index
-                        anchor_tag = next(
-                            (
-                                tag
-                                for tag in child.tag_names(anchor_index)
-                                if tag.startswith("event_")
-                            ),
-                            "",
-                        )
-                        if anchor_tag:
-                            try:
-                                scroll_state["anchor_sequence"] = int(
-                                    anchor_tag.removeprefix("event_")
-                                )
-                            except ValueError:
-                                scroll_state["anchor_sequence"] = None
+                        if not manual_position:
+                            anchor_tag = next(
+                                (
+                                    tag
+                                    for tag in child.tag_names(anchor_index)
+                                    if tag.startswith("event_")
+                                ),
+                                "",
+                            )
+                            if anchor_tag:
+                                try:
+                                    scroll_state["anchor_sequence"] = int(
+                                        anchor_tag.removeprefix("event_")
+                                    )
+                                except ValueError:
+                                    scroll_state["anchor_sequence"] = None
                     break
         except tk.TclError:
             return
@@ -7123,7 +7129,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 (tag, f"event_{entry.sequence}"),
             )
         timeline.configure(state="disabled")
-        keep_bottom = bool(scroll_state.get("at_bottom", True))
+        manual_position = bool(
+            scroll_state.get("manual_position", False)
+        )
+        keep_bottom = (
+            bool(scroll_state.get("at_bottom", True))
+            and not manual_position
+        )
         saved_top = float(scroll_state.get("top", 0.0) or 0.0)
         saved_index = str(scroll_state.get("index") or "1.0")
         saved_anchor_sequence = scroll_state.get("anchor_sequence")
@@ -7155,8 +7167,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                             timeline.yview_moveto(saved_top)
                 top, bottom = timeline.yview()
                 scroll_state["top"] = top
-                scroll_state["at_bottom"] = bottom >= 0.995
-                remember_anchor()
+                scroll_state["index"] = timeline.index("@8,7")
+                if not bool(scroll_state.get("manual_position", False)):
+                    scroll_state["at_bottom"] = bottom >= 0.995
+                    remember_anchor()
             except tk.TclError:
                 pass
 
@@ -7166,6 +7180,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             scroll_state["interaction_revision"] = (
                 int(scroll_state.get("interaction_revision", 0) or 0) + 1
             )
+            scroll_state["manual_position"] = True
+            scroll_state["at_bottom"] = False
 
         def remember_anchor() -> None:
             anchor_index = timeline.index("@8,7")
@@ -7192,8 +7208,15 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             except tk.TclError:
                 return
             scroll_state["top"] = top
-            scroll_state["at_bottom"] = bottom >= 0.995
             remember_anchor()
+            viewport_fraction = max(0.0, bottom - top)
+            genuinely_scrollable = viewport_fraction < 0.995
+            following_bottom = (
+                genuinely_scrollable
+                and bottom >= 0.995
+            )
+            scroll_state["at_bottom"] = following_bottom
+            scroll_state["manual_position"] = not following_bottom
 
         def scroll_text(event: tk.Event) -> str:
             mark_interaction()
