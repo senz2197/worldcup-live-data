@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import threading
@@ -31,6 +32,7 @@ AI_MODEL_PRESETS = {
 DEFAULT_AI_MODEL_PRESET = "agnes"
 AI_CACHE_RETENTION_SECONDS = 7 * 24 * 60 * 60
 AI_CACHE_META_KEY = "_match_cached_at"
+AI_EVENT_SIGNATURES_KEY = "_event_source_signatures"
 
 
 @dataclass(frozen=True)
@@ -80,10 +82,19 @@ class CommentaryService:
         if not isinstance(metadata, dict):
             metadata = {}
             self.cache[AI_CACHE_META_KEY] = metadata
+        signatures = self.cache.setdefault(
+            AI_EVENT_SIGNATURES_KEY,
+            {},
+        )
+        if not isinstance(signatures, dict):
+            self.cache[AI_EVENT_SIGNATURES_KEY] = {}
         now = int(time.time())
         changed = False
         for section, matches in self.cache.items():
-            if section == AI_CACHE_META_KEY or not isinstance(matches, dict):
+            if (
+                section in {AI_CACHE_META_KEY, AI_EVENT_SIGNATURES_KEY}
+                or not isinstance(matches, dict)
+            ):
                 continue
             for match_id in matches:
                 if match_id not in metadata:
@@ -103,7 +114,10 @@ class CommentaryService:
                 if self._timestamp(cached_at) < cutoff
             }
             for section, matches in self.cache.items():
-                if section == AI_CACHE_META_KEY or not isinstance(matches, dict):
+                if (
+                    section in {AI_CACHE_META_KEY, AI_EVENT_SIGNATURES_KEY}
+                    or not isinstance(matches, dict)
+                ):
                     continue
                 for match_id in expired:
                     if match_id in matches:
@@ -111,6 +125,16 @@ class CommentaryService:
                         removed.add(match_id)
             for match_id in expired:
                 metadata.pop(match_id, None)
+            signature_modes = self.cache.get(
+                AI_EVENT_SIGNATURES_KEY,
+                {},
+            )
+            if isinstance(signature_modes, dict):
+                for matches in signature_modes.values():
+                    if not isinstance(matches, dict):
+                        continue
+                    for match_id in expired:
+                        matches.pop(match_id, None)
             if expired:
                 self._save_cache()
         return len(removed)
@@ -118,7 +142,10 @@ class CommentaryService:
     def clear_cache(self) -> None:
         with self.lock:
             self.cache_generation += 1
-            self.cache = {AI_CACHE_META_KEY: {}}
+            self.cache = {
+                AI_CACHE_META_KEY: {},
+                AI_EVENT_SIGNATURES_KEY: {},
+            }
             self._save_cache()
 
     def cache_info(self) -> dict[str, int]:
@@ -137,7 +164,11 @@ class CommentaryService:
         match_id: str,
         entries: list[CommentaryEntry],
     ) -> bool:
-        cached = self.event_texts(match_id, mode="detail_narration_v4")
+        cached = self.event_texts(
+            match_id,
+            mode="detail_narration_v4",
+            entries=entries,
+        )
         return bool(entries) and all(entry.sequence in cached for entry in entries)
 
     @staticmethod
@@ -150,14 +181,50 @@ class CommentaryService:
     def _mark_cached(self, match_id: str) -> None:
         self.cache.setdefault(AI_CACHE_META_KEY, {})[match_id] = int(time.time())
 
-    def event_texts(self, match_id: str, mode: str = "narration_v3") -> dict[int, str]:
+    @staticmethod
+    def _event_signature(entry: CommentaryEntry) -> str:
+        source = "\n".join(
+            (
+                str(entry.minute or "").strip(),
+                " ".join(str(entry.text or "").split()),
+            )
+        )
+        return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+    def event_texts(
+        self,
+        match_id: str,
+        mode: str = "narration_v3",
+        entries: list[CommentaryEntry] | None = None,
+    ) -> dict[int, str]:
         rows = (self.cache.get(mode) or {}).get(match_id) or {}
+        signatures = (
+            (
+                (self.cache.get(AI_EVENT_SIGNATURES_KEY) or {})
+                .get(mode, {})
+            )
+            .get(match_id, {})
+        )
+        expected = (
+            {
+                entry.sequence: self._event_signature(entry)
+                for entry in entries
+            }
+            if entries is not None
+            else None
+        )
         result: dict[int, str] = {}
         for key, value in rows.items():
             try:
-                result[int(key)] = self._strip_minute_prefix(str(value))
+                sequence = int(key)
             except (TypeError, ValueError):
                 continue
+            if expected is not None:
+                if sequence not in expected:
+                    continue
+                if signatures.get(str(sequence)) != expected[sequence]:
+                    continue
+            result[sequence] = self._strip_minute_prefix(str(value))
         return result
 
     def summary(self, match_id: str, signature: str) -> str:
@@ -190,7 +257,7 @@ class CommentaryService:
         mode: str,
     ) -> dict[int, str]:
         generation = self.cache_generation
-        cached = self.event_texts(match.id, mode=mode)
+        cached = self.event_texts(match.id, mode=mode, entries=entries)
         missing_all = [entry for entry in entries if entry.sequence not in cached]
         if match.is_live:
             missing = missing_all[-3:]
@@ -216,8 +283,14 @@ class CommentaryService:
         )
         if not parsed:
             raise RuntimeError("AI 服务未返回可识别的事件文本")
-        self._store_event_texts(match.id, mode, parsed, generation)
-        return self.event_texts(match.id, mode=mode)
+        self._store_event_texts(
+            match.id,
+            mode,
+            parsed,
+            generation,
+            missing[:20],
+        )
+        return self.event_texts(match.id, mode=mode, entries=entries)
 
     def translate_complete_timeline(
         self,
@@ -227,7 +300,7 @@ class CommentaryService:
     ) -> dict[int, str]:
         generation = self.cache_generation
         mode = "detail_narration_v4"
-        cached = self.event_texts(match.id, mode=mode)
+        cached = self.event_texts(match.id, mode=mode, entries=entries)
         missing = [entry for entry in entries if entry.sequence not in cached]
         if missing:
             try:
@@ -240,18 +313,25 @@ class CommentaryService:
                 parsed = {}
             if parsed:
                 valid_sequences = {entry.sequence for entry in entries}
-                parsed = {
-                    sequence: text
-                    for sequence, text in parsed.items()
-                    if sequence in valid_sequences
-                }
+                if set(parsed) != valid_sequences:
+                    parsed = {}
+                else:
+                    parsed = (
+                        self._validate_event_batch(entries, parsed)
+                        or {}
+                    )
                 self._store_event_texts(
                     match.id,
                     mode,
                     parsed,
                     generation,
+                    entries,
                 )
-                cached = self.event_texts(match.id, mode=mode)
+                cached = self.event_texts(
+                    match.id,
+                    mode=mode,
+                    entries=entries,
+                )
                 missing = [
                     entry for entry in entries
                     if entry.sequence not in cached
@@ -268,8 +348,18 @@ class CommentaryService:
                     mode,
                 )
                 if parsed:
-                    self._store_event_texts(match.id, mode, parsed, generation)
-            cached = self.event_texts(match.id, mode=mode)
+                    self._store_event_texts(
+                        match.id,
+                        mode,
+                        parsed,
+                        generation,
+                        batch,
+                    )
+            cached = self.event_texts(
+                match.id,
+                mode=mode,
+                entries=entries,
+            )
             missing = [entry for entry in entries if entry.sequence not in cached]
         if missing:
             raise RuntimeError(f"仍有 {len(missing)} 条事件未能完成中文化")
@@ -397,12 +487,21 @@ class CommentaryService:
         mode: str,
     ) -> dict[int, str]:
         last_error: Exception | None = None
+        expected_sequences = {entry.sequence for entry in entries}
         for attempt in range(3):
             try:
                 parsed = self._request_event_batch(match, entries, api_key, mode)
-                if parsed:
-                    return parsed
-                last_error = RuntimeError("AI 返回内容暂时无法识别")
+                if set(parsed) != expected_sequences:
+                    last_error = RuntimeError(
+                        "AI 返回的事件编号与请求批次不一致"
+                    )
+                else:
+                    validated = self._validate_event_batch(entries, parsed)
+                    if validated is not None:
+                        return validated
+                    last_error = RuntimeError(
+                        "AI 返回内容与原始足球事件不一致"
+                    )
             except urllib.error.HTTPError as exc:
                 if exc.code in {400, 401, 403, 404}:
                     raise
@@ -413,19 +512,113 @@ class CommentaryService:
                 time.sleep(1.5 * (attempt + 1))
         raise RuntimeError("AI 中文润色请求超时，请稍后重试") from last_error
 
+    def _validate_event_batch(
+        self,
+        entries: list[CommentaryEntry],
+        rows: dict[int, str],
+    ) -> dict[int, str] | None:
+        result: dict[int, str] = {}
+        for entry in entries:
+            rendered = str(rows.get(entry.sequence) or "").strip()
+            source = str(entry.text or "").strip()
+            if not rendered or not self._event_semantics_match(source, rendered):
+                return None
+            result[entry.sequence] = self._canonical_event_text(
+                source,
+                rendered,
+            )
+        return result
+
+    @staticmethod
+    def _event_semantics_match(source: str, rendered: str) -> bool:
+        source_lower = source.casefold()
+        chinese = rendered.replace(" ", "")
+        source_goal = source_lower.startswith("goal!")
+        rendered_goal = any(
+            marker in chinese
+            for marker in (
+                "球进了",
+                "进球",
+                "破门",
+                "比分改写",
+                "扳平",
+                "打入",
+                "建功",
+                "洞穿",
+            )
+        )
+        if source_goal != rendered_goal:
+            return False
+        checks = (
+            ("yellow card", ("黄牌",)),
+            ("red card", ("红牌", "罚下")),
+            ("substitution", ("换人", "替补")),
+            ("corner,", ("角球",)),
+            ("offside", ("越位",)),
+            ("var decision", ("VAR", "视频助理裁判")),
+            ("attempt blocked", ("被挡", "封堵", "挡出")),
+            ("attempt saved", ("扑出", "扑救", "没收")),
+            ("attempt missed", ("偏出", "高出", "打偏", "未能命中")),
+        )
+        for source_marker, translated_markers in checks:
+            if source_marker in source_lower and not any(
+                marker in rendered for marker in translated_markers
+            ):
+                return False
+        return True
+
+    @staticmethod
+    def _canonical_event_text(source: str, rendered: str) -> str:
+        free_kick = re.match(
+            r"^(.+?) \((.+?)\) wins a free kick in the "
+            r"(defensive half|attacking half|left wing|right wing)\.$",
+            source,
+            flags=re.IGNORECASE,
+        )
+        if free_kick:
+            player, team, area = free_kick.groups()
+            area_text = {
+                "defensive half": "防守半场",
+                "attacking half": "进攻半场",
+                "left wing": "左路",
+                "right wing": "右路",
+            }[area.casefold()]
+            return f"{player}（{team}）在{area_text}赢得任意球。"
+        foul = re.match(
+            r"^Foul by (.+?) \((.+?)\)\.$",
+            source,
+            flags=re.IGNORECASE,
+        )
+        if foul:
+            player, team = foul.groups()
+            return f"{player}（{team}）出现犯规动作。"
+        return rendered
+
     def _store_event_texts(
         self,
         match_id: str,
         mode: str,
         rows: dict[int, str],
         generation: int,
+        entries: list[CommentaryEntry],
     ) -> None:
         with self.lock:
             if generation != self.cache_generation:
                 return
             events = self.cache.setdefault(mode, {}).setdefault(match_id, {})
+            signatures = (
+                self.cache
+                .setdefault(AI_EVENT_SIGNATURES_KEY, {})
+                .setdefault(mode, {})
+                .setdefault(match_id, {})
+            )
+            entry_map = {entry.sequence: entry for entry in entries}
             for sequence, text in rows.items():
+                entry = entry_map.get(sequence)
+                if entry is None:
+                    continue
                 events[str(sequence)] = text
+                signatures[str(sequence)] = self._event_signature(entry)
             self._mark_cached(match_id)
             self._save_cache()
 
@@ -435,7 +628,11 @@ class CommentaryService:
         entries: list[CommentaryEntry],
         mode: str,
     ) -> bool:
-        cached = self.event_texts(match_id, mode=mode)
+        cached = self.event_texts(
+            match_id,
+            mode=mode,
+            entries=entries,
+        )
         return any(entry.sequence not in cached for entry in entries)
 
     def summarize_match(
@@ -452,6 +649,7 @@ class CommentaryService:
         rendered_timeline = self.event_texts(
             match.id,
             mode="detail_narration_v4",
+            entries=entries,
         )
         full_timeline = [
             f"{self._summary_minute(entry.minute)} "

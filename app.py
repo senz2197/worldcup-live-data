@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.13"
+APP_VERSION = "1.5.14"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -1159,18 +1159,54 @@ class WorldCupFloatApp:
             or (snapshot.season_year if snapshot is not None else 0)
             or 0
         )
+        competition_key = (
+            competition_key
+            or (snapshot.competition_key if snapshot is not None else "")
+        )
+        competition = COMPETITIONS.get(competition_key, {})
+        period_type = str(competition.get("period_type") or "")
         if year <= 0:
-            return "赛季待定"
-        if competition_key in COMPETITIONS:
-            is_league = COMPETITIONS[competition_key].get("kind") == "league"
-        else:
-            is_league = bool(
-                snapshot
-                and snapshot.competition_kind == "league"
+            return "届次待定" if period_type == "edition" else "赛季待定"
+        if period_type == "edition":
+            edition = int(competition.get("edition") or 0)
+            competition_name = str(
+                competition.get("name") or "赛事"
             )
-        if is_league:
-            return f"{year}-{str(year + 1)[-2:]} 赛季"
-        return f"{year} 赛季"
+            if edition:
+                return f"第{edition}届{competition_name}（{year}年）"
+            return f"{year}年{competition_name}"
+        if period_type == "season" or (
+            snapshot and snapshot.competition_kind == "league"
+        ):
+            return f"{year}-{str(year + 1)[-2:]}赛季"
+        return f"{year}年赛事"
+
+    @staticmethod
+    def _cache_age_label(age_seconds: float) -> str:
+        if age_seconds < 3600:
+            return f"{max(1, int(age_seconds // 60))} 分钟前"
+        if age_seconds < 86400:
+            return f"{max(1, int(age_seconds // 3600))} 小时前"
+        return f"{max(1, int(age_seconds // 86400))} 天前"
+
+    def _period_with_cache_status(
+        self,
+        cache_marker: str,
+    ) -> str:
+        period = self._season_label(snapshot=self.snapshot)
+        if not self.snapshot:
+            return period
+        ages = [
+            age
+            for cache_name, age in self.snapshot.stale_sources.items()
+            if cache_marker in cache_name
+        ]
+        if not ages:
+            return period
+        return (
+            f"{period} · 数据来自"
+            f"{self._cache_age_label(max(ages))}缓存"
+        )
 
     def _valid_font_name(self, value: str | None, fallback: str) -> str:
         value = str(value or "").strip()
@@ -4024,11 +4060,24 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             selected = self._option_for_team(self.selected_team_id)
             if selected:
                 self.team_var.set(selected)
-        errors = f"；{len(snapshot.errors)} 个源使用缓存/降级" if snapshot.errors else ""
+        stale_count = len(snapshot.stale_sources)
+        errors = (
+            f"；{stale_count} 个源使用陈旧缓存，后台将继续重试"
+            if stale_count
+            else (
+                f"；{len(snapshot.errors)} 个源不可用/降级"
+                if snapshot.errors else ""
+            )
+        )
         source_text = " / ".join(snapshot.sources[:3]) if snapshot.sources else "缓存"
         if not quiet or not had_snapshot:
-            season = f" · {snapshot.season_name}" if snapshot.season_name else ""
-            self._set_status_text(f"已同步 {len(snapshot.matches)} 场比赛，{len(snapshot.teams)} 支球队{season} · {source_text}{errors}")
+            period = f" · {self._season_label(snapshot=snapshot)}"
+            status_prefix = "已载入" if stale_count else "已同步"
+            self._set_status_text(
+                f"{status_prefix} {len(snapshot.matches)} 场比赛，"
+                f"{len(snapshot.teams)} 支球队{period} · "
+                f"{source_text}{errors}"
+            )
         for tab, old_signature in old_signatures.items():
             if old_signature != self._active_signature(snapshot, tab=tab):
                 self.tab_rendered_signatures.pop(tab, None)
@@ -4385,11 +4434,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 force=force,
             )
             mode = "narration_v3" if use_ai else "translations"
-            translations = self.commentary_service.event_texts(match.id, mode=mode)
+            translations = self.commentary_service.event_texts(
+                match.id,
+                mode=mode,
+                entries=entries,
+            )
             translations.update(
                 self.commentary_service.event_texts(
                     match.id,
                     mode="detail_narration_v4",
+                    entries=entries,
                 )
             )
             ai_error = ""
@@ -4629,6 +4683,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 self.commentary_service.event_texts(
                     match.id,
                     mode="detail_narration_v4",
+                    entries=entries,
                 )
             )
             translations.update(
@@ -5279,7 +5334,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             frame.body,
             "联赛积分" if is_league else "小组积分",
             (
-                f"{self._season_label(snapshot=self.snapshot)} · "
+                f"{self._period_with_cache_status('_standings.json')} · "
                 "胜平负、进失球、净胜球与积分"
             ),
         )
@@ -6039,17 +6094,28 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
     def _data_board_season_label(self) -> str:
         if not self.snapshot:
-            return "赛季待定"
+            return "赛事周期待定"
         seasons = self.professional_board_seasons.get(
             self.snapshot.competition_key,
             set(),
         )
         if not seasons:
-            return self._season_label(snapshot=self.snapshot)
-        return " / ".join(
+            return self._period_with_cache_status("_stats.json")
+        period = " / ".join(
             self._season_label(year, self.snapshot)
             for year in sorted(seasons)
         )
+        ages = [
+            age
+            for cache_name, age in self.snapshot.stale_sources.items()
+            if "_stats.json" in cache_name
+        ]
+        if ages:
+            period += (
+                f" · 榜单来自"
+                f"{self._cache_age_label(max(ages))}缓存"
+            )
+        return period
 
     def _load_professional_boards(self, snapshot: Snapshot) -> None:
         key = snapshot.competition_key

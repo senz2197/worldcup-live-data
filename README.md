@@ -27,6 +27,8 @@ WorldCupFloat_Portable.zip
 - Group standings with GP/W/D/L/GF/GA/GD/PTS
 - League tables and World Cup knockout bracket placeholders
 - Standings, professional data boards, and player statistics identify the exact season that supplied their data, including previous-season fallbacks
+- World Cups use edition labels such as `第23届世界杯（2026年）`; leagues use season labels such as `2025-26赛季`
+- Stale ESPN fallback data displays its local cache age instead of appearing as a successful current sync
 - Competition-specific statistical leaderboards
 - Professional league leaderboards for goals, assists, goal contributions, appearances, starts, shots, shots on target, conversion, fouls, cards, offsides, and saves
 - Favorite team support for every competition
@@ -43,6 +45,8 @@ WorldCupFloat_Portable.zip
 - Theme presets and editable colors with locally persisted settings
 - One-click GitHub update that preserves the current local configuration
 - ESPN play-by-play commentary shown directly below each live score card
+- AI commentary cache entries are bound to exact source-event fingerprints, so shifted or edited ESPN events invalidate old translations
+- AI event batches require complete sequence coverage and football-event semantic validation before entering the cache
 - Clicking live commentary opens a dedicated full timeline that stays synchronized with the main live feed
 - Full commentary drag positions survive refreshes; new events auto-follow only when the viewer is already at the bottom
 - Chinese AI commentary with raw-data and translation modes

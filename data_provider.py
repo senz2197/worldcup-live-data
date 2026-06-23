@@ -31,36 +31,43 @@ COMPETITIONS = {
         "espn": "fifa.world",
         "kind": "tournament",
         "year": 2026,
+        "period_type": "edition",
+        "edition": 23,
     },
     "premier_league": {
         "name": "英超",
         "title": "英超实时数据",
         "espn": "eng.1",
         "kind": "league",
+        "period_type": "season",
     },
     "laliga": {
         "name": "西甲",
         "title": "西甲实时数据",
         "espn": "esp.1",
         "kind": "league",
+        "period_type": "season",
     },
     "bundesliga": {
         "name": "德甲",
         "title": "德甲实时数据",
         "espn": "ger.1",
         "kind": "league",
+        "period_type": "season",
     },
     "serie_a": {
         "name": "意甲",
         "title": "意甲实时数据",
         "espn": "ita.1",
         "kind": "league",
+        "period_type": "season",
     },
     "ligue_1": {
         "name": "法甲",
         "title": "法甲实时数据",
         "espn": "fra.1",
         "kind": "league",
+        "period_type": "season",
     },
 }
 
@@ -222,6 +229,7 @@ class Snapshot:
     competition_kind: str = "tournament"
     season_year: int = 2026
     season_name: str = ""
+    stale_sources: dict[str, float] = field(default_factory=dict)
 
 
 def parse_datetime(value: str | None) -> datetime | None:
@@ -300,6 +308,7 @@ class DataProvider:
         self.competition = COMPETITIONS["worldcup"]
         self.season_year = int(self.competition.get("year") or datetime.now().year)
         self.season_name = ""
+        self.stale_cache_fallbacks: dict[str, float] = {}
         self.set_competition(competition_key)
 
     def set_competition(self, competition_key: str) -> None:
@@ -335,6 +344,7 @@ class DataProvider:
         self.matches = []
         self.standings = []
         self.leaderboards = []
+        self.stale_cache_fallbacks = {}
 
         try:
             teams_data = self.fetch_json(
@@ -344,7 +354,7 @@ class DataProvider:
                 force=force,
             )
             self._parse_espn_teams(teams_data)
-            sources.append("ESPN teams")
+            sources.append(self._source_label("ESPN teams", self._cache_name("teams")))
         except Exception as exc:
             errors.append(f"ESPN 球队数据不可用: {exc}")
 
@@ -363,7 +373,12 @@ class DataProvider:
                 season.get("displayName") or ""
             )
             self.standings = self._parse_espn_standings(standings_data)
-            sources.append("ESPN standings")
+            sources.append(
+                self._source_label(
+                    "ESPN standings",
+                    self._cache_name("standings"),
+                )
+            )
         except Exception as exc:
             errors.append(f"ESPN 积分榜不可用: {exc}")
 
@@ -371,7 +386,12 @@ class DataProvider:
             scoreboard_data = self._load_scoreboard(force=force)
             self.matches = self._parse_espn_matches(scoreboard_data)
             self._assign_round_numbers()
-            sources.append("ESPN scoreboard")
+            sources.append(
+                self._source_group_label(
+                    "ESPN scoreboard",
+                    self._cache_name("scoreboard_").removesuffix(".json"),
+                )
+            )
         except Exception as exc:
             errors.append(f"ESPN 赛程比分不可用: {exc}")
 
@@ -383,7 +403,12 @@ class DataProvider:
                 force=force,
             )
             self.leaderboards = self._parse_espn_leaderboards(stats_data)
-            sources.append("ESPN statistics")
+            sources.append(
+                self._source_label(
+                    "ESPN statistics",
+                    self._cache_name("stats"),
+                )
+            )
         except Exception as exc:
             errors.append(f"ESPN 球员榜单不可用: {exc}")
 
@@ -396,6 +421,12 @@ class DataProvider:
                 sources.append("worldcup26.ir fallback")
             except Exception as exc:
                 errors.append(f"备用源不可用: {exc}")
+
+        for cache_name, age in self.stale_cache_fallbacks.items():
+            errors.append(
+                f"{cache_name} 连接失败，使用"
+                f"{self._cache_age_text(age)}前的本地缓存"
+            )
 
         self.matches.sort(key=lambda match: match.date or datetime.max.replace(tzinfo=timezone.utc))
         snapshot = Snapshot(
@@ -411,6 +442,7 @@ class DataProvider:
             competition_kind=str(self.competition["kind"]),
             season_year=self.season_year,
             season_name=self.season_name,
+            stale_sources=dict(self.stale_cache_fallbacks),
         )
         self.last_snapshot = snapshot
         return snapshot
@@ -580,22 +612,67 @@ class DataProvider:
             cache_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
             return data
         except Exception:
-            stale = self._read_cache(cache_path, ttl_seconds=None)
+            stale = self._read_cache_envelope(cache_path)
             if stale is not None:
-                return stale
+                fetched_at, data = stale
+                self.stale_cache_fallbacks[cache_name] = max(
+                    0.0,
+                    time.time() - fetched_at,
+                )
+                return data
             raise
 
-    def _read_cache(self, cache_path: Path, ttl_seconds: int | None) -> dict[str, Any] | None:
+    def _source_label(self, label: str, cache_name: str) -> str:
+        age = self.stale_cache_fallbacks.get(cache_name)
+        if age is None:
+            return label
+        return f"{label} (stale cache {self._cache_age_text(age)})"
+
+    def _source_group_label(
+        self,
+        label: str,
+        cache_prefix: str,
+    ) -> str:
+        ages = [
+            age
+            for cache_name, age in self.stale_cache_fallbacks.items()
+            if cache_name.startswith(cache_prefix)
+        ]
+        if not ages:
+            return label
+        return f"{label} (stale cache {self._cache_age_text(max(ages))})"
+
+    @staticmethod
+    def _cache_age_text(age_seconds: float) -> str:
+        if age_seconds < 3600:
+            return f"{max(1, int(age_seconds // 60))}m"
+        if age_seconds < 86400:
+            return f"{max(1, int(age_seconds // 3600))}h"
+        return f"{max(1, int(age_seconds // 86400))}d"
+
+    def _read_cache_envelope(
+        self,
+        cache_path: Path,
+    ) -> tuple[float, dict[str, Any]] | None:
         if not cache_path.exists():
             return None
         try:
             envelope = json.loads(cache_path.read_text(encoding="utf-8"))
-            fetched_at = float(envelope.get("fetched_at", 0))
-            if ttl_seconds is not None and time.time() - fetched_at > ttl_seconds:
+            data = envelope.get("data")
+            if not isinstance(data, dict):
                 return None
-            return envelope.get("data")
+            return float(envelope.get("fetched_at", 0)), data
         except Exception:
             return None
+
+    def _read_cache(self, cache_path: Path, ttl_seconds: int | None) -> dict[str, Any] | None:
+        cached = self._read_cache_envelope(cache_path)
+        if cached is None:
+            return None
+        fetched_at, data = cached
+        if ttl_seconds is not None and time.time() - fetched_at > ttl_seconds:
+            return None
+        return data
 
     def _request_json(self, url: str) -> dict[str, Any]:
         request = urllib.request.Request(
