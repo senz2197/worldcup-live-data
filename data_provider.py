@@ -403,6 +403,7 @@ class DataProvider:
                 force=force,
             )
             self.leaderboards = self._parse_espn_leaderboards(stats_data)
+            self._apply_completed_event_corrections()
             sources.append(
                 self._source_label(
                     "ESPN statistics",
@@ -411,6 +412,7 @@ class DataProvider:
             )
         except Exception as exc:
             errors.append(f"ESPN 球员榜单不可用: {exc}")
+            self._apply_completed_event_corrections()
 
         if (
             self.competition_key == "worldcup"
@@ -965,6 +967,148 @@ class DataProvider:
                 )
             boards.append(board)
         return boards
+
+    def _apply_completed_event_corrections(self) -> None:
+        corrections = {
+            "goalsLeaders": self._completed_event_totals("goal", "G", skip_own_goals=True),
+            "yellowCardsLeaders": self._completed_event_totals("yellow", "YC"),
+            "redCardsLeaders": self._completed_event_totals("red", "RC"),
+        }
+        for board_key, rows in corrections.items():
+            self._merge_event_leaderboard(board_key, rows)
+
+    def _completed_event_totals(
+        self,
+        kind: str,
+        stat_key: str,
+        skip_own_goals: bool = False,
+    ) -> dict[str, dict[str, Any]]:
+        totals: dict[str, dict[str, Any]] = {}
+        for match in self.matches:
+            if not match.completed:
+                continue
+            teams = {match.home.id: match.home, match.away.id: match.away}
+            for event in match.events:
+                if event.get("kind") != kind:
+                    continue
+                if skip_own_goals and event.get("own_goal"):
+                    continue
+                player_name = str(event.get("player_name") or "").strip()
+                team_id = str(event.get("team_id") or "")
+                if not player_name:
+                    continue
+                player_id = str(event.get("player_id") or "").strip()
+                if not player_id:
+                    player_id = f"event:{team_id}:{player_name.casefold()}"
+                team = teams.get(team_id) or self.teams.get(team_id)
+                row = totals.setdefault(
+                    player_id,
+                    {
+                        stat_key: 0,
+                        "APP": set(),
+                        "EVENT_MATCHES": [],
+                        "player_name": player_name,
+                        "team_id": team_id,
+                        "team_name": getattr(team, "name", ""),
+                        "team_abbreviation": getattr(team, "abbreviation", ""),
+                        "team_logo": getattr(team, "logo", ""),
+                    },
+                )
+                row[stat_key] += 1
+                row["APP"].add(match.id)
+                row["EVENT_MATCHES"].append(match.id)
+                if player_name:
+                    row["player_name"] = player_name
+                if team is not None:
+                    row["team_name"] = getattr(team, "name", "")
+                    row["team_abbreviation"] = getattr(team, "abbreviation", "")
+                    row["team_logo"] = getattr(team, "logo", "")
+        return totals
+
+    def _merge_event_leaderboard(
+        self,
+        board_key: str,
+        event_rows: dict[str, dict[str, Any]],
+    ) -> None:
+        if not event_rows:
+            return
+        stat_key, label, suffix = {
+            "goalsLeaders": ("G", "Goals", "Goals"),
+            "yellowCardsLeaders": ("YC", "Yellow Cards", "Yellow Cards"),
+            "redCardsLeaders": ("RC", "Red Cards", "Red Cards"),
+        }[board_key]
+        board = next((item for item in self.leaderboards if item.key == board_key), None)
+        if board is None:
+            board = Leaderboard(board_key, label)
+            self.leaderboards.append(board)
+        by_player = {row.player_id: row for row in board.rows}
+        for player_id, data in event_rows.items():
+            event_value = int(data.get(stat_key) or 0)
+            if event_value <= 0:
+                continue
+            row = by_player.get(player_id)
+            if row is None:
+                row = LeaderRow(
+                    rank=0,
+                    player_id=player_id,
+                    player_name=str(data.get("player_name") or ""),
+                    team_id=str(data.get("team_id") or ""),
+                    team_name=str(data.get("team_name") or ""),
+                    team_abbreviation=str(data.get("team_abbreviation") or ""),
+                    team_logo=str(data.get("team_logo") or ""),
+                    display_value="",
+                    stats={},
+                )
+                board.rows.append(row)
+                by_player[player_id] = row
+            official_value = self._leader_stat_int(row.stats, stat_key)
+            if event_value <= official_value:
+                continue
+            official_apps = self._leader_stat_int(row.stats, "APP")
+            event_match_ids = [
+                str(match_id)
+                for match_id in data.get("EVENT_MATCHES") or []
+                if match_id
+            ]
+            official_event_matches = set(event_match_ids[:official_value])
+            correction_event_matches = set(event_match_ids[official_value:])
+            corrected_match_count = len(
+                correction_event_matches - official_event_matches
+            )
+            apps = max(
+                official_apps + corrected_match_count,
+                official_apps,
+                len(data.get("APP") or []),
+            )
+            row.stats[stat_key] = str(event_value)
+            row.stats["APP"] = str(apps)
+            row.stats[f"official{stat_key}"] = str(official_value)
+            row.stats["eventCorrected"] = "1"
+            row.display_value = f"Matches: {apps}, {suffix}: {event_value}"
+            if not row.team_id:
+                row.team_id = str(data.get("team_id") or "")
+            if not row.team_name:
+                row.team_name = str(data.get("team_name") or "")
+            if not row.team_abbreviation:
+                row.team_abbreviation = str(data.get("team_abbreviation") or "")
+            if not row.team_logo:
+                row.team_logo = str(data.get("team_logo") or "")
+        board.rows.sort(
+            key=lambda row: (
+                -self._leader_stat_int(row.stats, stat_key),
+                -self._leader_stat_int(row.stats, "A"),
+                row.player_name,
+            )
+        )
+        for index, row in enumerate(board.rows, start=1):
+            row.rank = index
+
+    @staticmethod
+    def _leader_stat_int(stats: dict[str, str], key: str) -> int:
+        try:
+            return int(float(str(stats.get(key, "0")).replace("+", "") or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _parse_roster(
         self,

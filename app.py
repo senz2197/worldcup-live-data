@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.14"
+APP_VERSION = "1.5.15"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -261,6 +261,17 @@ PROFESSIONAL_BOARD_DEFS = [
     ("redCardsLeaders", "红牌榜", "RC", True, " 张"),
     ("savesLeaders", "扑救榜", "SV", True, " 次"),
 ]
+
+DATA_BOARD_LIMIT_OPTIONS = [
+    ("top10", "Top10"),
+    ("top50", "Top50"),
+    ("all", "全部"),
+]
+DATA_BOARD_LIMITS = {
+    "top10": 10,
+    "top50": 50,
+    "all": 0,
+}
 
 OFFICIAL_LIVE_TARGETS = {
     "worldcup": [("央视体育", "https://sports.cctv.com/"), ("CCTV-5", "https://tv.cctv.com/live/cctv5/")],
@@ -710,6 +721,11 @@ class WorldCupFloatApp:
         self.selected_team_id = ""
         self.selected_player_id = ""
         self.active_data_board_key = ""
+        self.data_board_limit_var = tk.StringVar(
+            value=self._valid_data_board_limit(
+                self.config.get("data_board_limit")
+            )
+        )
         self.data_board_buttons: dict[str, tk.Label] = {}
         self.rosters: dict[tuple[str, str], list[Player]] = {}
         self.roster_loaded_at: dict[tuple[str, str], float] = {}
@@ -1066,6 +1082,7 @@ class WorldCupFloatApp:
                         "default_refresh_seconds": self._valid_seconds(self.default_refresh_seconds_var.get(), 300) if hasattr(self, "default_refresh_seconds_var") else 300,
                         "roster_refresh_hours": max(1, min(168, int(self.roster_refresh_hours_var.get()))) if hasattr(self, "roster_refresh_hours_var") else 24,
                         "news_weeks": max(1, min(12, int(self.news_weeks_var.get()))) if hasattr(self, "news_weeks_var") else 1,
+                        "data_board_limit": self._valid_data_board_limit(self.data_board_limit_var.get()) if hasattr(self, "data_board_limit_var") else "top10",
                         "ui_font": self._valid_font_name(self.ui_font_var.get(), DEFAULT_UI_FONT) if hasattr(self, "ui_font_var") else DEFAULT_UI_FONT,
                         "score_font": self._valid_font_name(self.score_font_var.get(), DEFAULT_SCORE_FONT) if hasattr(self, "score_font_var") else DEFAULT_SCORE_FONT,
                     },
@@ -1146,6 +1163,10 @@ class WorldCupFloatApp:
         except (TypeError, ValueError):
             return fallback
         return max(1, min(lines, 8))
+
+    def _valid_data_board_limit(self, value: object) -> str:
+        value = str(value or "").strip()
+        return value if value in DATA_BOARD_LIMITS else "top10"
 
     def _season_label(
         self,
@@ -2560,6 +2581,15 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
 
     def _stat_label(self, key: str) -> str:
         return PLAYER_STAT_LABELS.get(key, key)
+
+    def _leader_value_text(self, value: str) -> str:
+        return (
+            value.replace("Matches:", "赛")
+            .replace("Goals:", "球")
+            .replace("Assists:", "助攻")
+            .replace("Yellow Cards:", "黄牌")
+            .replace("Red Cards:", "红牌")
+        )
 
     def _team_option_text(self, team: Team) -> str:
         return f"{team.abbreviation or team.name} · {self._team_text(team)}"
@@ -4170,7 +4200,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             return prefix + (
                 "data",
                 self.active_data_board_key,
-                tuple((board.key, tuple((row.player_id, row.display_value) for row in board.rows[:12])) for board in self._data_boards(snapshot)),
+                self._valid_data_board_limit(self.data_board_limit_var.get()),
+                tuple((board.key, tuple((row.player_id, row.display_value) for row in self._limited_board_rows(board))) for board in self._data_boards(snapshot)),
             )
         if tab == "team":
             roster_key = self._roster_key(
@@ -4211,11 +4242,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                     label = self.standing_labels.get((team.id, key))
                     if label is not None:
                         self._safe_label_config(label, text=value)
-        for board in self.snapshot.leaderboards:
-            for row in board.rows[:12]:
+        for board in self._data_boards(self.snapshot):
+            for row in self._limited_board_rows(board):
                 label = self.leader_labels.get((board.key, row.player_id))
                 if label is not None:
-                    value = row.display_value.replace("Matches:", "赛").replace("Goals:", "球").replace("Assists:", "助攻")
+                    value = self._leader_value_text(row.display_value)
                     self._safe_label_config(label, text=value)
 
     def _apply_match_labels(self, labels: dict[str, object], match: Match) -> None:
@@ -5989,6 +6020,23 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         if self.active_tab == "data":
             self.render_data()
 
+    def _select_data_board_limit(self, key: str) -> None:
+        key = self._valid_data_board_limit(key)
+        self.data_board_limit_var.set(key)
+        self._save_config()
+        self._invalidate_render_cache("data")
+        if self.active_tab == "data":
+            self.render_data()
+
+    def _data_board_limit_count(self) -> int:
+        return DATA_BOARD_LIMITS[
+            self._valid_data_board_limit(self.data_board_limit_var.get())
+        ]
+
+    def _limited_board_rows(self, board: Leaderboard) -> list[LeaderRow]:
+        count = self._data_board_limit_count()
+        return list(board.rows if count <= 0 else board.rows[:count])
+
     def _data_boards(self, snapshot: Snapshot | None = None) -> list[Leaderboard]:
         snapshot = snapshot or self.snapshot
         if not snapshot:
@@ -6035,7 +6083,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         for index, row in enumerate(contribution_rows, start=1):
             row.rank = index
         if contribution_rows and not any(board.key == "goalContributions" for board in boards):
-            boards.append(Leaderboard("goalContributions", "Goal Contributions", contribution_rows[:50]))
+            boards.append(Leaderboard("goalContributions", "Goal Contributions", contribution_rows))
 
         team_rows: list[tuple[str, str, str]] = []
         for group in snapshot.standings:
@@ -6177,10 +6225,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 display = f"{value:g}{suffix}" if isinstance(value, float) else f"{value}{suffix}"
                 rows.append(LeaderRow(0, player.id, player.name, team.id, team.name, team.abbreviation, team.logo, display, {**player.stats, "value": str(value)}))
             rows.sort(key=lambda row: (-float(row.stats.get("value", 0)), row.player_name) if descending else (float(row.stats.get("value", 0)), row.player_name))
-            for index, row in enumerate(rows[:50], 1):
+            for index, row in enumerate(rows, 1):
                 row.rank = index
             if rows:
-                boards.append(Leaderboard(key, name, rows[:50]))
+                boards.append(Leaderboard(key, name, rows))
         return boards
 
     def _apply_professional_boards(
@@ -7626,8 +7674,38 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _leaderboard(self, parent: tk.Widget, board: Leaderboard) -> None:
         wrap = tk.Frame(parent, bg=PANEL, padx=10, pady=10, highlightthickness=1, highlightbackground=LINE)
         wrap.pack(fill="x", pady=6)
-        tk.Label(wrap, text=self._board_text(board.key, board.name), bg=PANEL, fg=ACCENT, font=("Microsoft YaHei UI", 12, "bold")).pack(anchor="w", pady=(0, 8))
-        for row in board.rows[:12]:
+        head = tk.Frame(wrap, bg=PANEL)
+        head.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            head,
+            text=self._board_text(board.key, board.name),
+            bg=PANEL,
+            fg=ACCENT,
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).pack(side="left", fill="x", expand=True, anchor="w")
+        limit_box = tk.Frame(head, bg=PANEL)
+        limit_box.pack(side="right", anchor="e")
+        for key, label in DATA_BOARD_LIMIT_OPTIONS:
+            active = key == self._valid_data_board_limit(
+                self.data_board_limit_var.get()
+            )
+            button = tk.Label(
+                limit_box,
+                text=label,
+                bg=PANEL_3 if active else PANEL_2,
+                fg=ACCENT if active else MUTED,
+                padx=6,
+                pady=2,
+                cursor="hand2",
+                font=("Microsoft YaHei UI", 7, "bold"),
+            )
+            button.pack(side="left", padx=(3, 0))
+            self._bind_click(
+                button,
+                lambda _event, current=key:
+                self._select_data_board_limit(current),
+            )
+        for row in self._limited_board_rows(board):
             line = tk.Frame(wrap, bg=PANEL)
             line.pack(fill="x", pady=3)
             tk.Label(line, text=str(row.rank), bg=PANEL, fg=MUTED, width=3, anchor="w").pack(side="left")
@@ -7670,7 +7748,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             team_label.pack(fill="x")
             self._bind_wrap(team_label, reserve=6, minimum=80, maximum=190)
             self._bind_team_open(team_label, row.team_id)
-            value = row.display_value.replace("Matches:", "赛").replace("Goals:", "球").replace("Assists:", "助攻")
+            value = self._leader_value_text(row.display_value)
             value_label = tk.Label(line, text=value, bg=PANEL, fg=WARNING, anchor="e", justify="right", font=("Microsoft YaHei UI", 8, "bold"), wraplength=82)
             value_label.pack(side="right")
             self.leader_labels[(board.key, row.player_id)] = value_label
