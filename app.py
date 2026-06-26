@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.15"
+APP_VERSION = "1.5.16"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -795,6 +795,7 @@ class WorldCupFloatApp:
         self.title_box: tk.Frame | None = None
         self.title_label: tk.Label | None = None
         self.status_label: tk.Label | None = None
+        self.status_hide_after_id: str | None = None
         self.competition_button: tk.Label | None = None
         self.quick_refresh_button: tk.Label | None = None
         self.tab_bar: tk.Frame | None = None
@@ -1620,17 +1621,38 @@ class WorldCupFloatApp:
     def _apply_status_visibility(self) -> None:
         if self.status_label is None:
             return
+        if self.status_hide_after_id is not None:
+            try:
+                self.root.after_cancel(self.status_hide_after_id)
+            except tk.TclError:
+                pass
+            self.status_hide_after_id = None
         if self.show_status_var.get():
             self.status_var.set(self.last_status_text)
-            if not self.status_label.winfo_manager():
-                self.status_label.grid(
-                    row=1,
-                    column=0,
-                    columnspan=4,
-                    sticky="ew",
-                    pady=(2, 0),
-                )
+            self._show_status_label()
         else:
+            self.status_var.set("")
+            self.status_label.grid_remove()
+
+    def _show_status_label(self) -> None:
+        if self.status_label is None:
+            return
+        if not self.status_label.winfo_manager():
+            self.status_label.grid(
+                row=1,
+                column=0,
+                columnspan=4,
+                sticky="ew",
+                pady=(2, 0),
+            )
+
+    def _restore_status_visibility(self) -> None:
+        self.status_hide_after_id = None
+        if self.show_status_var.get():
+            self.status_var.set(self.last_status_text)
+            self._show_status_label()
+        elif self.status_label is not None:
+            self.status_var.set("")
             self.status_label.grid_remove()
 
     def _save_refresh_settings(self, *_args) -> None:
@@ -2700,7 +2722,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             highlightthickness=0,
             bd=0,
         )
-        self._bind_click(quick_refresh, lambda _event: self.refresh_data(force=True, quiet=True))
+        self._bind_click(
+            quick_refresh,
+            lambda _event: self.refresh_data(
+                force=True,
+                quiet=False,
+                feedback=True,
+            ),
+        )
         self.quick_refresh_button = quick_refresh
         title_label = tk.Label(
             title_box,
@@ -3272,7 +3301,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _build_context_menu(self) -> None:
         menu = tk.Menu(self.root, tearoff=0)
         menu.add_command(label="显示/隐藏", command=self.toggle_visibility)
-        menu.add_command(label="刷新数据", command=lambda: self.refresh_data(force=True))
+        menu.add_command(
+            label="刷新数据",
+            command=lambda: self.refresh_data(
+                force=True,
+                quiet=False,
+                feedback=True,
+            ),
+        )
         menu.add_command(label="设置", command=self.open_settings)
         menu.add_separator()
         menu.add_command(label="退出", command=self.exit_app)
@@ -3296,7 +3332,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         image = self._tray_image()
         menu = pystray.Menu(
             pystray.MenuItem("显示/隐藏", schedule(self.toggle_visibility), default=True),
-            pystray.MenuItem("刷新数据", schedule(lambda: self.refresh_data(force=True))),
+            pystray.MenuItem(
+                "刷新数据",
+                schedule(
+                    lambda: self.refresh_data(
+                        force=True,
+                        quiet=False,
+                        feedback=True,
+                    )
+                ),
+            ),
             pystray.MenuItem("设置", schedule(self.open_settings)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("退出", schedule(self.exit_app)),
@@ -3957,15 +4002,38 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             return True
         return self.tab_rendered_signatures.get(key) != self._active_signature(tab=key)
 
-    def refresh_data(self, force: bool = False, quiet: bool = True) -> None:
+    def refresh_data(
+        self,
+        force: bool = False,
+        quiet: bool = True,
+        feedback: bool = False,
+    ) -> None:
         if not self.refresh_lock.acquire(blocking=False):
+            if feedback:
+                self._set_status_text(
+                    "正在同步赛事数据，请稍候...",
+                    force_visible=True,
+                    transient_ms=1800,
+                )
             self.root.after(
                 250,
-                lambda: self.refresh_data(force=force, quiet=quiet),
+                lambda: self.refresh_data(
+                    force=force,
+                    quiet=quiet,
+                    feedback=feedback,
+                ),
             )
             return
+        if feedback:
+            self._set_status_text(
+                "正在同步赛事数据...",
+                force_visible=True,
+            )
         if not quiet and self.snapshot is None:
-            self._set_status_text("正在加载赛事数据...")
+            self._set_status_text(
+                "正在加载赛事数据...",
+                force_visible=feedback,
+            )
 
         competition_key = self.active_competition_key
         provider = DataProvider(
@@ -3982,11 +4050,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                         current,
                         current_provider,
                         quiet,
+                        feedback,
                     )
                 )
             except Exception as exc:
-                if not quiet or self.snapshot is None:
-                    self._post_ui(lambda error=exc: self._set_status_text(f"同步失败: {error}"))
+                if feedback or not quiet or self.snapshot is None:
+                    self._post_ui(
+                        lambda error=exc: self._set_status_text(
+                            f"同步失败: {error}",
+                            force_visible=feedback,
+                            transient_ms=5200 if feedback else 0,
+                        )
+                    )
             finally:
                 self.refresh_lock.release()
 
@@ -3997,12 +4072,19 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         snapshot: Snapshot,
         provider: DataProvider,
         quiet: bool,
+        feedback: bool = False,
     ) -> None:
         self.snapshot_cache[snapshot.competition_key] = snapshot
         if snapshot.competition_key != self.active_competition_key:
             return
         self.provider = provider
         self._apply_snapshot(snapshot, quiet=quiet)
+        if feedback:
+            self._set_status_text(
+                self._snapshot_status_text(snapshot),
+                force_visible=True,
+                transient_ms=4200,
+            )
 
     def _auto_refresh(self) -> None:
         self.refresh_data(force=False, quiet=True)
@@ -4030,12 +4112,48 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
     def _has_live_matches(self) -> bool:
         return bool(self.snapshot and any(match.is_live for match in self.snapshot.matches))
 
-    def _set_status_text(self, text: str) -> None:
+    def _set_status_text(
+        self,
+        text: str,
+        force_visible: bool = False,
+        transient_ms: int = 0,
+    ) -> None:
         self.last_status_text = text
-        if self.show_status_var.get():
+        if self.status_hide_after_id is not None:
+            try:
+                self.root.after_cancel(self.status_hide_after_id)
+            except tk.TclError:
+                pass
+            self.status_hide_after_id = None
+        if self.show_status_var.get() or force_visible:
             self.status_var.set(text)
+            self._show_status_label()
+            if force_visible and not self.show_status_var.get() and transient_ms > 0:
+                self.status_hide_after_id = self.root.after(
+                    transient_ms,
+                    self._restore_status_visibility,
+                )
         else:
             self.status_var.set("")
+
+    def _snapshot_status_text(self, snapshot: Snapshot) -> str:
+        stale_count = len(snapshot.stale_sources)
+        errors = (
+            f"；{stale_count} 个源使用陈旧缓存，后台将继续重试"
+            if stale_count
+            else (
+                f"；{len(snapshot.errors)} 个源不可用/降级"
+                if snapshot.errors else ""
+            )
+        )
+        source_text = " / ".join(snapshot.sources[:3]) if snapshot.sources else "缓存"
+        period = f" · {self._season_label(snapshot=snapshot)}"
+        status_prefix = "已载入" if stale_count else "已同步"
+        return (
+            f"{status_prefix} {len(snapshot.matches)} 场比赛，"
+            f"{len(snapshot.teams)} 支球队{period} · "
+            f"{source_text}{errors}"
+        )
 
     def _apply_snapshot(self, snapshot: Snapshot, quiet: bool = True) -> None:
         active_frame = self.tabs.get(self.active_tab)
@@ -4090,24 +4208,8 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             selected = self._option_for_team(self.selected_team_id)
             if selected:
                 self.team_var.set(selected)
-        stale_count = len(snapshot.stale_sources)
-        errors = (
-            f"；{stale_count} 个源使用陈旧缓存，后台将继续重试"
-            if stale_count
-            else (
-                f"；{len(snapshot.errors)} 个源不可用/降级"
-                if snapshot.errors else ""
-            )
-        )
-        source_text = " / ".join(snapshot.sources[:3]) if snapshot.sources else "缓存"
         if not quiet or not had_snapshot:
-            period = f" · {self._season_label(snapshot=snapshot)}"
-            status_prefix = "已载入" if stale_count else "已同步"
-            self._set_status_text(
-                f"{status_prefix} {len(snapshot.matches)} 场比赛，"
-                f"{len(snapshot.teams)} 支球队{period} · "
-                f"{source_text}{errors}"
-            )
+            self._set_status_text(self._snapshot_status_text(snapshot))
         for tab, old_signature in old_signatures.items():
             if old_signature != self._active_signature(snapshot, tab=tab):
                 self.tab_rendered_signatures.pop(tab, None)
