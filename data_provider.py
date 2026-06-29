@@ -96,6 +96,7 @@ ROUND_LABELS = {
 }
 
 ROUND_SLUG_ALIASES = {
+    "3rd-place-match": "third-place",
     "third-place-match": "third-place",
 }
 
@@ -288,6 +289,22 @@ def extract_player_stats(payload: Any) -> dict[str, str]:
 
 def safe_filename(value: str) -> str:
     return re.sub(r"[^a-zA-Z0-9_.-]+", "_", value).strip("_") or "cache"
+
+
+PLACEHOLDER_TEAM_NAME_RE = re.compile(
+    r"^(?:"
+    r"(?:Round of (?:32|16)|Quarterfinal|Semifinal)\s+\d+\s+(?:Winner|Loser)"
+    r"|Final\s+(?:Winner|Loser)"
+    r"|(?:Winner|Runner-up|Third Place)\s+Group\s+[A-L]"
+    r"|Group\s+[A-L]\s+(?:Winner|Runner-up|Third Place)"
+    r"|TBD|To Be Determined"
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def is_placeholder_team_name(name: str) -> bool:
+    return bool(PLACEHOLDER_TEAM_NAME_RE.match(str(name or "").strip()))
 
 
 class DataProvider:
@@ -713,9 +730,11 @@ class DataProvider:
         team_id = str(team_data.get("id") or competitor.get("id") or "")
         team = self.teams.get(team_id)
         name = team_data.get("displayName") or team_data.get("name") or competitor.get("displayName") or "待定"
+        placeholder = is_placeholder_team_name(name) or is_placeholder_team_name(team.name if team else "")
         if team is None and team_id:
             team = self._team_from_espn(team_data)
-            if team.id and name and "Winner" not in name and "Place" not in name:
+            placeholder = placeholder or is_placeholder_team_name(team.name)
+            if team.id and name and not placeholder:
                 self.teams[team.id] = team
         return MatchTeam(
             id=team_id,
@@ -724,7 +743,7 @@ class DataProvider:
             logo=(team.logo if team else pick_logo(team_data)) or "",
             score=str(competitor.get("score") or ""),
             winner=competitor.get("winner"),
-            clickable=bool(team_id and team_id in self.teams),
+            clickable=bool(team_id and team_id in self.teams and not placeholder),
         )
 
     def _parse_espn_matches(self, data: dict[str, Any]) -> list[Match]:

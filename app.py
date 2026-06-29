@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.16"
+APP_VERSION = "1.5.17"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -4057,7 +4057,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 if feedback or not quiet or self.snapshot is None:
                     self._post_ui(
                         lambda error=exc: self._set_status_text(
-                            f"同步失败: {error}",
+                            f"同步失败：{self._short_status_detail(error)}",
                             force_visible=feedback,
                             transient_ms=5200 if feedback else 0,
                         )
@@ -4081,7 +4081,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._apply_snapshot(snapshot, quiet=quiet)
         if feedback:
             self._set_status_text(
-                self._snapshot_status_text(snapshot),
+                self._refresh_feedback_text(snapshot),
                 force_visible=True,
                 transient_ms=4200,
             )
@@ -4154,6 +4154,20 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             f"{len(snapshot.teams)} 支球队{period} · "
             f"{source_text}{errors}"
         )
+
+    @staticmethod
+    def _short_status_detail(value: object, limit: int = 28) -> str:
+        text = str(value or "").splitlines()[0].strip()
+        if not text:
+            return "请稍后重试"
+        return text if len(text) <= limit else f"{text[:limit - 1]}…"
+
+    def _refresh_feedback_text(self, snapshot: Snapshot) -> str:
+        if snapshot.stale_sources:
+            return "已使用缓存，稍后自动重试"
+        if snapshot.errors:
+            return "同步完成，部分数据源降级"
+        return "同步完成"
 
     def _apply_snapshot(self, snapshot: Snapshot, quiet: bool = True) -> None:
         active_frame = self.tabs.get(self.active_tab)
