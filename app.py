@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.18"
+APP_VERSION = "1.5.19"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -4386,10 +4386,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         home_name = self._team_text(match.home)
         away_name = self._team_text(match.away)
         scoreline = self._scoreline(match)
-        penalty_line = self._penalty_scoreline(match)
+        penalty_line = self._penalty_scoreline(match, include_label=False)
+        penalty_text = self._penalty_scoreline(match)
         summary = f"{away_name} {match.away.score or '-'} : {match.home.score or '-'} {home_name}"
-        if penalty_line:
-            summary = f"{summary}（{penalty_line}）"
+        if penalty_text:
+            summary = f"{summary}（{penalty_text}）"
         updates = {
             "round": f"{match.round_name}{group}",
             "status": f"{when} · {status}",
@@ -4432,10 +4433,11 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         return "VS"
 
     @staticmethod
-    def _penalty_scoreline(match: Match) -> str:
+    def _penalty_scoreline(match: Match, include_label: bool = True) -> str:
         if not (match.home.shootout_score or match.away.shootout_score):
             return ""
-        return f"点球 {match.home.shootout_score or '0'} - {match.away.shootout_score or '0'}"
+        score = f"{match.home.shootout_score or '0'} - {match.away.shootout_score or '0'}"
+        return f"点球 {score}" if include_label else score
 
     def _option_for_team(self, team_id: str) -> str:
         for option, current_id in self.team_options.items():
@@ -6622,6 +6624,23 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         )
         score_box.grid(row=0, column=1, sticky="nsew", padx=3)
         score_box.grid_propagate(False)
+        score_box.columnconfigure(0, weight=1)
+        score_box.rowconfigure(0, minsize=19, weight=0)
+        score_box.rowconfigure(1, minsize=44, weight=1)
+        score_box.rowconfigure(2, minsize=19, weight=0)
+        penalty_text = self._penalty_scoreline(match, include_label=False)
+        penalty_label = tk.Label(
+            score_box,
+            text=penalty_text,
+            bg=PANEL,
+            fg=ACCENT,
+            anchor="center",
+            justify="center",
+            padx=5,
+            pady=1,
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        penalty_label.grid(row=0, column=0, sticky="s", pady=(0, 1))
         scoreline_label = tk.Label(
             score_box,
             text=self._scoreline(match),
@@ -6632,17 +6651,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             font=("Microsoft YaHei UI", 20, "bold"),
         )
         scoreline_label._worldcup_score_font = True
-        scoreline_label.place(relx=0.5, rely=0.5, anchor="center")
-        penalty_label = tk.Label(
-            score_box,
-            text=self._penalty_scoreline(match),
-            bg=PANEL,
-            fg=ACCENT,
-            anchor="center",
-            justify="center",
-            font=("Microsoft YaHei UI", 8, "bold"),
-        )
-        penalty_label.place(relx=0.5, rely=1.0, y=-1, anchor="s")
+        scoreline_label.grid(row=1, column=0, sticky="nsew")
         away_labels = self._score_team_block(layout, match.away, align="right", column=2, row=0)
 
         def align_header(_event: tk.Event | None = None) -> None:
@@ -6751,6 +6760,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._bind_match_open(layout, match)
         self._bind_match_open(score_box, match)
         self._bind_match_open(scoreline_label, match)
+        self._bind_match_open(penalty_label, match)
         live_target = self._official_live_target(match)
         if live_target is not None and self.show_live_labels_var.get():
             live_button = tk.Label(
@@ -6761,9 +6771,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 cursor="hand2",
                 padx=5,
                 pady=1,
-                font=("Microsoft YaHei UI", 7, "bold"),
+                font=("Microsoft YaHei UI", 8, "bold"),
             )
-            live_button.place(relx=0.5, rely=1.0, y=-1, anchor="s")
+            live_button.grid(row=2, column=0, sticky="n", pady=(1, 0))
             self._bind_click(live_button, lambda _event, current=match: self._open_official_live(current))
         if match.is_live:
             self._commentary_preview(parent, match)

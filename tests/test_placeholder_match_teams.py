@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app import WorldCupFloatApp
 from data_provider import DataProvider, Team
 
 
@@ -157,6 +158,11 @@ class PlaceholderMatchTeamTest(unittest.TestCase):
         self.assertEqual(matches[0].away.score, "1")
         self.assertEqual(matches[0].home.shootout_score, "3")
         self.assertEqual(matches[0].away.shootout_score, "4")
+        self.assertEqual(WorldCupFloatApp._penalty_scoreline(matches[0]), "点球 3 - 4")
+        self.assertEqual(
+            WorldCupFloatApp._penalty_scoreline(matches[0], include_label=False),
+            "3 - 4",
+        )
 
 
 if __name__ == "__main__":
