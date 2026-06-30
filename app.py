@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.21"
+APP_VERSION = "1.5.22"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -4435,14 +4435,14 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         try:
             has_penalty = bool(str(penalty.cget("text") or "").strip())
             if has_penalty:
-                penalty.place(relx=0.5, y=56, anchor="center")
+                penalty.place(relx=0.5, y=62, anchor="center")
             else:
                 penalty.place_forget()
             scoreline.place(relx=0.5, y=38 if has_penalty else 41, anchor="center")
             scoreline.lift()
             penalty.lift()
             if isinstance(live_button, tk.Label) and live_button.winfo_exists():
-                live_button.place(relx=0.5, y=74 if has_penalty else 63, anchor="center")
+                live_button.place(relx=0.5, y=78 if has_penalty else 63, anchor="center")
                 live_button.lift()
         except tk.TclError:
             return
