@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.17"
+APP_VERSION = "1.5.18"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -4287,13 +4287,13 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         matches = self._filtered_matches(snapshot)
         if tab == "live":
             mode, _title, spotlight = self._spotlight_matches(snapshot)
-            return prefix + ("spotlight", mode, self.selected_team_id, bool(self.show_live_labels_var.get()), tuple((m.id, m.status_state, m.home.score, m.away.score) for m in spotlight))
+            return prefix + ("spotlight", mode, self.selected_team_id, bool(self.show_live_labels_var.get()), tuple(self._match_score_signature(m) for m in spotlight))
         if tab == "upcoming":
-            return prefix + ("upcoming", self.round_selection.get("upcoming"), self.selected_team_id, bool(self.show_live_labels_var.get()), tuple((m.id, m.status_state) for m in matches if m.is_upcoming))
+            return prefix + ("upcoming", self.round_selection.get("upcoming"), self.selected_team_id, bool(self.show_live_labels_var.get()), tuple(self._match_score_signature(m) for m in matches if m.is_upcoming))
         if tab == "results":
             completed = [m for m in matches if m.completed]
             completed.sort(key=lambda m: m.date or MIN_DATE, reverse=True)
-            return prefix + ("results", self.round_selection.get("results"), self.selected_team_id, tuple((m.id, m.home.score, m.away.score) for m in completed))
+            return prefix + ("results", self.round_selection.get("results"), self.selected_team_id, tuple(self._match_score_signature(m) for m in completed))
         if tab == "bracket":
             knockout = [m for m in snapshot.matches if m.round_slug != "group-stage"]
             if (
@@ -4301,7 +4301,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 and snapshot.competition_kind != "league"
             ):
                 knockout = [m for m in knockout if m.home.id == self.selected_team_id or m.away.id == self.selected_team_id]
-            return prefix + ("bracket", self.selected_team_id, tuple((m.id, m.status_state, m.home.score, m.away.score) for m in knockout))
+            return prefix + ("bracket", self.selected_team_id, tuple(self._match_score_signature(m) for m in knockout))
         if tab == "standings":
             groups = snapshot.standings
             if self.selected_team_id:
@@ -4329,7 +4329,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 "error" if roster_key in self.roster_errors else
                 len(self.rosters.get(roster_key, []))
             )
-            team_matches = [(m.id, m.status_state, m.home.score, m.away.score) for m in snapshot.matches if m.home.id == self.selected_team_id or m.away.id == self.selected_team_id]
+            team_matches = [self._match_score_signature(m) for m in snapshot.matches if m.home.id == self.selected_team_id or m.away.id == self.selected_team_id]
             return prefix + ("team", self.selected_team_id, roster_state, tuple(team_matches))
         if tab == "news":
             rows = self.news_items.get(snapshot.competition_key, [])
@@ -4340,6 +4340,19 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 tuple((item.id, item.translated_title) for item in rows),
             )
         return prefix + (tab, self.selected_team_id)
+
+    @staticmethod
+    def _match_score_signature(match: Match) -> tuple:
+        return (
+            match.id,
+            match.status_state,
+            match.home.id,
+            match.away.id,
+            match.home.score,
+            match.away.score,
+            match.home.shootout_score,
+            match.away.shootout_score,
+        )
 
     def _update_visible_text(self) -> None:
         if not self.snapshot:
@@ -4373,7 +4386,10 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         home_name = self._team_text(match.home)
         away_name = self._team_text(match.away)
         scoreline = self._scoreline(match)
+        penalty_line = self._penalty_scoreline(match)
         summary = f"{away_name} {match.away.score or '-'} : {match.home.score or '-'} {home_name}"
+        if penalty_line:
+            summary = f"{summary}（{penalty_line}）"
         updates = {
             "round": f"{match.round_name}{group}",
             "status": f"{when} · {status}",
@@ -4382,6 +4398,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             "away_name": away_name,
             "home_name": home_name,
             "scoreline": scoreline,
+            "penalty": penalty_line,
             "when": when,
             "summary": summary,
         }
@@ -4407,10 +4424,18 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         except tk.TclError:
             pass
 
-    def _scoreline(self, match: Match) -> str:
+    def _scoreline(self, match: Match, include_shootout: bool = False) -> str:
         if (match.completed or match.is_live) and (match.home.score != "" or match.away.score != ""):
-            return f"{match.home.score or '0'} - {match.away.score or '0'}"
+            score = f"{match.home.score or '0'} - {match.away.score or '0'}"
+            penalty = self._penalty_scoreline(match)
+            return f"{score}（{penalty}）" if include_shootout and penalty else score
         return "VS"
+
+    @staticmethod
+    def _penalty_scoreline(match: Match) -> str:
+        if not (match.home.shootout_score or match.away.shootout_score):
+            return ""
+        return f"点球 {match.home.shootout_score or '0'} - {match.away.shootout_score or '0'}"
 
     def _option_for_team(self, team_id: str) -> str:
         for option, current_id in self.team_options.items():
@@ -6608,6 +6633,16 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         )
         scoreline_label._worldcup_score_font = True
         scoreline_label.place(relx=0.5, rely=0.5, anchor="center")
+        penalty_label = tk.Label(
+            score_box,
+            text=self._penalty_scoreline(match),
+            bg=PANEL,
+            fg=ACCENT,
+            anchor="center",
+            justify="center",
+            font=("Microsoft YaHei UI", 8, "bold"),
+        )
+        penalty_label.place(relx=0.5, rely=1.0, y=-1, anchor="s")
         away_labels = self._score_team_block(layout, match.away, align="right", column=2, row=0)
 
         def align_header(_event: tk.Event | None = None) -> None:
@@ -6708,6 +6743,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             "away_name": away_labels["name"],
             "home_name": home_labels["name"],
             "scoreline": scoreline_label,
+            "penalty": penalty_label,
             "_header": header,
         }
         self.match_labels.setdefault(match.id, []).append(labels)
@@ -6909,7 +6945,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 font=("Microsoft YaHei UI", 9, "bold"),
             )
             names.pack(fill="x")
-            score = self._scoreline(match)
+            score = self._scoreline(match, include_shootout=True)
             detail = tk.Label(
                 row,
                 text=f"{score}  ·  {match.status_text or '进行中'}",
@@ -7095,7 +7131,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self.match_detail_scroll = body
         body.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         title = (
-            f"{self._team_text(match.home)}  {self._scoreline(match)}  "
+            f"{self._team_text(match.home)}  {self._scoreline(match, include_shootout=True)}  "
             f"{self._team_text(match.away)}"
         )
         title_label = tk.Label(
@@ -7125,7 +7161,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         self._load_complete_detail_commentary(match)
 
     def _match_detail(self, parent: tk.Widget, match: Match) -> None:
-        title = f"{self._team_text(match.home)}  {self._scoreline(match)}  {self._team_text(match.away)}"
+        title = f"{self._team_text(match.home)}  {self._scoreline(match, include_shootout=True)}  {self._team_text(match.away)}"
         title_label = tk.Label(parent, text=title, bg=PANEL, fg=TEXT, justify="left", font=("Microsoft YaHei UI", 13, "bold"))
         title_label.pack(anchor="w", fill="x")
         self._bind_wrap(title_label, reserve=8, minimum=140, maximum=310)
@@ -7137,6 +7173,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             ("状态", status),
             ("场馆", match.venue or "场馆待定"),
         ]
+        penalty = self._penalty_scoreline(match)
+        if penalty:
+            rows.insert(3, ("点球", penalty.replace("点球 ", "")))
         if match.detail:
             rows.append(("备注", match.detail))
         box = tk.Frame(parent, bg=PANEL)

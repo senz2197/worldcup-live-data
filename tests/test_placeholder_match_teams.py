@@ -110,6 +110,54 @@ class PlaceholderMatchTeamTest(unittest.TestCase):
         self.assertEqual(matches[0].round_slug, "third-place")
         self.assertEqual(matches[0].round_name, "季军赛")
 
+    def test_penalty_shootout_score_is_preserved(self) -> None:
+        matches = self.provider._parse_espn_matches(
+            {
+                "events": [
+                    {
+                        "id": "760489",
+                        "name": "Paraguay at Germany",
+                        "date": "2026-06-29T20:30Z",
+                        "season": {"slug": "round-of-32"},
+                        "status": {"type": {"state": "post", "completed": True, "shortDetail": "FT-Pens"}},
+                        "competitions": [
+                            {
+                                "competitors": [
+                                    {
+                                        "homeAway": "home",
+                                        "score": "1",
+                                        "shootoutScore": "3",
+                                        "winner": False,
+                                        "team": {
+                                            "id": "481",
+                                            "displayName": "Germany",
+                                            "abbreviation": "GER",
+                                        },
+                                    },
+                                    {
+                                        "homeAway": "away",
+                                        "score": "1",
+                                        "shootoutScore": "4",
+                                        "winner": True,
+                                        "team": {
+                                            "id": "210",
+                                            "displayName": "Paraguay",
+                                            "abbreviation": "PAR",
+                                        },
+                                    },
+                                ]
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(matches[0].home.score, "1")
+        self.assertEqual(matches[0].away.score, "1")
+        self.assertEqual(matches[0].home.shootout_score, "3")
+        self.assertEqual(matches[0].away.shootout_score, "4")
+
 
 if __name__ == "__main__":
     unittest.main()

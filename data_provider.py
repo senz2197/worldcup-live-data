@@ -132,6 +132,7 @@ class MatchTeam:
     abbreviation: str = ""
     logo: str = ""
     score: str = ""
+    shootout_score: str = ""
     winner: bool | None = None
     clickable: bool = False
 
@@ -730,6 +731,7 @@ class DataProvider:
         team_id = str(team_data.get("id") or competitor.get("id") or "")
         team = self.teams.get(team_id)
         name = team_data.get("displayName") or team_data.get("name") or competitor.get("displayName") or "待定"
+        shootout_score = competitor.get("shootoutScore")
         placeholder = is_placeholder_team_name(name) or is_placeholder_team_name(team.name if team else "")
         if team is None and team_id:
             team = self._team_from_espn(team_data)
@@ -742,6 +744,7 @@ class DataProvider:
             abbreviation=(team.abbreviation if team else team_data.get("abbreviation", "")) or "",
             logo=(team.logo if team else pick_logo(team_data)) or "",
             score=str(competitor.get("score") or ""),
+            shootout_score="" if shootout_score in (None, "") else str(shootout_score),
             winner=competitor.get("winner"),
             clickable=bool(team_id and team_id in self.teams and not placeholder),
         )
