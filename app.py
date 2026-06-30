@@ -67,7 +67,7 @@ DEFAULT_APP_TITLE = "世界杯实时数据"
 DEFAULT_ICON_CHOICE = "icon_1"
 DEFAULT_UI_FONT = "Microsoft YaHei UI"
 DEFAULT_SCORE_FONT = "Bahnschrift SemiBold"
-APP_VERSION = "1.5.19"
+APP_VERSION = "1.5.20"
 GITHUB_REPOSITORY = "senz2197/worldcup-live-data"
 GITHUB_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPOSITORY}/main/version.json"
 GITHUB_LATEST_DOWNLOAD_URL = (
@@ -4417,6 +4417,7 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 header.after_idle(align_header)
             except tk.TclError:
                 pass
+        self._layout_score_box_labels(labels)
 
     def _safe_label_config(self, label: tk.Label, **kwargs) -> None:
         try:
@@ -4424,6 +4425,24 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 label.configure(**kwargs)
         except tk.TclError:
             pass
+
+    def _layout_score_box_labels(self, labels: dict[str, object]) -> None:
+        scoreline = labels.get("scoreline")
+        penalty = labels.get("penalty")
+        live_button = labels.get("live_button")
+        if not isinstance(scoreline, tk.Label) or not isinstance(penalty, tk.Label):
+            return
+        try:
+            has_penalty = bool(str(penalty.cget("text") or "").strip())
+            if has_penalty:
+                penalty.place(relx=0.5, y=18, anchor="center")
+            else:
+                penalty.place_forget()
+            scoreline.place(relx=0.5, y=38 if has_penalty else 41, anchor="center")
+            if isinstance(live_button, tk.Label) and live_button.winfo_exists():
+                live_button.place(relx=0.5, y=62 if has_penalty else 63, anchor="center")
+        except tk.TclError:
+            return
 
     def _scoreline(self, match: Match, include_shootout: bool = False) -> str:
         if (match.completed or match.is_live) and (match.home.score != "" or match.away.score != ""):
@@ -6624,10 +6643,6 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
         )
         score_box.grid(row=0, column=1, sticky="nsew", padx=3)
         score_box.grid_propagate(False)
-        score_box.columnconfigure(0, weight=1)
-        score_box.rowconfigure(0, minsize=19, weight=0)
-        score_box.rowconfigure(1, minsize=44, weight=1)
-        score_box.rowconfigure(2, minsize=19, weight=0)
         penalty_text = self._penalty_scoreline(match, include_label=False)
         penalty_label = tk.Label(
             score_box,
@@ -6640,7 +6655,6 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             pady=1,
             font=("Microsoft YaHei UI", 8, "bold"),
         )
-        penalty_label.grid(row=0, column=0, sticky="s", pady=(0, 1))
         scoreline_label = tk.Label(
             score_box,
             text=self._scoreline(match),
@@ -6651,7 +6665,6 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
             font=("Microsoft YaHei UI", 20, "bold"),
         )
         scoreline_label._worldcup_score_font = True
-        scoreline_label.grid(row=1, column=0, sticky="nsew")
         away_labels = self._score_team_block(layout, match.away, align="right", column=2, row=0)
 
         def align_header(_event: tk.Event | None = None) -> None:
@@ -6773,8 +6786,9 @@ Remove-Item -LiteralPath $Archive -Force -ErrorAction SilentlyContinue
                 pady=1,
                 font=("Microsoft YaHei UI", 8, "bold"),
             )
-            live_button.grid(row=2, column=0, sticky="n", pady=(1, 0))
+            labels["live_button"] = live_button
             self._bind_click(live_button, lambda _event, current=match: self._open_official_live(current))
+        self._layout_score_box_labels(labels)
         if match.is_live:
             self._commentary_preview(parent, match)
 
